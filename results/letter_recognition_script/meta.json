@@ -1,0 +1,7 @@
+{
+  "alpha": 0.1,
+  "n_trials": 10,
+  "seed": 42,
+  "risk_model": "tabicl",
+  "n_classes": 26
+}

@@ -1,0 +1,4 @@
+method,n_trials,marginal_risk,excess_event_rate,worst_bin_risk,avg_set_size
+aa_crc_style,10,0.0972 ± 0.0048,0.3,0.2398 ± 0.0161,2.14 ± 0.09
+recirc_tabicl,10,0.0977 ± 0.0047,0.3,0.1845 ± 0.0183,2.24 ± 0.13
+crc,10,0.0985 ± 0.0014,0.1,0.3002 ± 0.0124,3.00 ± 0.00
