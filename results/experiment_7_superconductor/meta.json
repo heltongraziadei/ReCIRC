@@ -1,0 +1,39 @@
+{
+  "experiment": "mechanism_superconductor",
+  "alpha": 0.1,
+  "n_trials": 20,
+  "seed": 42,
+  "n_obs": 21263,
+  "n_features": 81,
+  "slice_features": [
+    "range_ThermalConductivity",
+    "wtd_std_ThermalConductivity"
+  ],
+  "slice_bins": 4,
+  "risk_backend": "tabicl",
+  "tabicl_device": "cuda",
+  "tabicl_context_size": 4000,
+  "frac_D": 0.4,
+  "frac_C": 0.3,
+  "loss_weights": {
+    "w_neg": 0.2,
+    "w_pos": 0.8
+  },
+  "quantiles": [
+    0.05,
+    0.5,
+    0.95
+  ],
+  "lambda_grid": {
+    "n": 80,
+    "max": 4.0,
+    "n_train_anchors": 16
+  },
+  "qrf": {
+    "n_estimators": 200,
+    "max_depth": 12,
+    "min_samples_leaf": 40
+  },
+  "slice_nmin": 50,
+  "elapsed_seconds": 1867.7122204303741
+}

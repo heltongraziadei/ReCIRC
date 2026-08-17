@@ -1,0 +1,4 @@
+method,n_trials,marginal_risk,excess_event_rate,worst_slice_risk,mean_excess_slice,avg_width
+ReCIRC-TabICL,20,0.0965 ± 0.0172,0.3,0.1403 ± 0.0363,0.01213086061179638,6783 ± 950
+AA-CRC (D∪C),20,0.0965 ± 0.0109,0.3,0.1929 ± 0.0592,0.02081451085396111,7845 ± 699
+CRC marginal,20,0.0917 ± 0.0185,0.3,0.2021 ± 0.0753,0.024312915839254857,9199 ± 1262
