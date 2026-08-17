@@ -128,7 +128,7 @@ FAIR_BUDGET = True
 USE_AACRC = HAS_AACRC
 
 # Fonte de dados
-USE_SYNTHETIC = True  # Mude para False para usar RCV1 real
+USE_SYNTHETIC = False  # Mude para False para usar RCV1 real
 RCV1_N_BASE = 12000
 RCV1_N_POOL = 18000
 
