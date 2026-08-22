@@ -55,7 +55,7 @@ import json
 
 
 # ============================================================================
-# 1. SETUP: clone do AA-CRC oficial e imports
+# 1. SETUP: clone the official AA-CRC repository and imports
 # ============================================================================
 
 def sh(c):
@@ -73,7 +73,7 @@ try:
 except Exception:
     sh(f"{sys.executable} -m pip install -q tabicl")
 
-# Importar AA-CRC oficial
+# Import the official AA-CRC implementation
 try:
     from multiaccurate_cp.utils.multiaccurate import J, J_prime
     HAS_AACRC = True
@@ -103,7 +103,7 @@ plt.rcParams.update({"figure.dpi": 110})
 
 
 # ============================================================================
-# 2. CONFIGURAÇÃO
+# 2. CONFIGURATION
 # ============================================================================
 
 ALPHA = 0.10
@@ -127,15 +127,15 @@ LAMBDA_RIDGE = 0.01
 FAIR_BUDGET = True
 USE_AACRC = HAS_AACRC
 
-# Fonte de dados
-USE_SYNTHETIC = False  # Mude para False para usar RCV1 real
+# Data source
+USE_SYNTHETIC = False  # Change to False to use the real RCV1 dataset
 RCV1_N_BASE = 12000
 RCV1_N_POOL = 18000
 
 N_TRIALS = 20
 BASE_SEED = 12345
 
-# Cache dos escores OVR e rótulos
+# Cache for OVR scores and labels
 if os.environ.get("RCV1_CACHE_DIR"):
     RCV1_CACHE_DIR = os.environ["RCV1_CACHE_DIR"]
 elif os.path.isdir("/content/drive"):
@@ -143,7 +143,7 @@ elif os.path.isdir("/content/drive"):
 else:
     RCV1_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rcv1_cache")
 
-# Diretório raiz para resultados
+# Root directory for results
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.isdir("/content/drive"):
     RESULTS_ROOT = "/content/drive/MyDrive/PythonReCIRC/results"
@@ -152,7 +152,7 @@ else:
 
 
 # ============================================================================
-# 3. CARREGAMENTO DOS ESCORES E RÓTULOS
+# 3. LOADING SCORES AND LABELS
 # ============================================================================
 
 def make_synthetic_multilabel(n, K=80, seed=0):
@@ -248,7 +248,7 @@ def load_data():
 
 
 # ============================================================================
-# 4. FUNÇÕES BÁSICAS: perdas, features, bins de dificuldade
+# 4. BASIC FUNCTIONS: losses, features, and difficulty bins
 # ============================================================================
 
 
@@ -321,7 +321,7 @@ def make_features(scores, include_full_scores=True):
 
 
 # ============================================================================
-# 6. DIFICULDADE E BINS
+# 6. DIFFICULTY AND BINS
 # ============================================================================
 
 
@@ -352,7 +352,7 @@ def apply_difficulty_bins(scores, edges, kind="entropy"):
 
 
 # ============================================================================
-# 7. CRC MARGINAL (baseline)
+# 7. MARGINAL CRC (baseline)
 # ============================================================================
 
 
@@ -418,7 +418,7 @@ def run_aacrc(
 
 
 # ============================================================================
-# 9. ReCIRC-TabICL (Rota 2)
+# 9. ReCIRC-TabICL (Route 2)
 # ============================================================================
 
 
@@ -480,11 +480,11 @@ def run_recirc(
 
     t0 = time.time()
 
-    # Treina o modelo de risco
+    # Train the risk model
     X_aug, Z = build_augmented(D_sc, D_lb, lambda_grid, include_full_scores)
     model = fit_risk_model(X_aug, Z, device=device, seed=seed)
 
-    # Prediz e calibra
+    # Predict and calibrate
     R_cal = predict_risk_matrix(model, cal_scores, lambda_grid, include_full_scores)
     R_test = predict_risk_matrix(model, test_scores, lambda_grid, include_full_scores)
 
@@ -516,7 +516,7 @@ def run_recirc(
 
 
 # ============================================================================
-# 10. EXECUÇÃO: Split único com sanity check
+# 10. EXECUTION: Single split with sanity check
 # ============================================================================
 
 
@@ -549,7 +549,7 @@ def run_single_split(sgmd, labels):
 
     results = {}
 
-    # CRC marginal
+    # Marginal CRC
     lam_crc = choose_lambda_crc(calM_scores, calM_labels, ALPHA, LAMBDA_GRID_CRC, B=B)
     pred_crc = prediction_sets(test_scores, lam_crc)
     results["CRC marginal"] = {
@@ -588,7 +588,7 @@ def run_single_split(sgmd, labels):
         f"lam={o['lambdas'].mean():.3f}±{o['lambdas'].std():.3f} | {o['time']:.1f}s"
     )
 
-    # Tabela de resumo
+    # Summary table
     df = pd.DataFrame(
         [
             {
@@ -612,7 +612,7 @@ def run_single_split(sgmd, labels):
 
 
 # ============================================================================
-# 11. MÚLTIPLOS SPLITS: variância e cobertura condicional
+# 11. MULTIPLE SPLITS: variance and conditional coverage
 # ============================================================================
 
 
@@ -651,7 +651,7 @@ def run_one_split_trial(scores, gt, seed):
 
     preds, lam_img = {}, {}
 
-    # CRC marginal
+    # Marginal CRC
     lam = choose_lambda_crc(cMs, cMl, ALPHA, LAMBDA_GRID_CRC, B=B)
     preds["CRC marginal"] = prediction_sets(ts, lam)
     lam_img["CRC marginal"] = None
@@ -672,7 +672,7 @@ def run_one_split_trial(scores, gt, seed):
     preds[rk] = o["pred"]
     lam_img[rk] = o["lambdas"]
 
-    # Resumos marginais
+    # Marginal summaries
     marg = pd.DataFrame(
         [
             {"method": k, "test_fnr": avg_fnr(p, tl), "avg_size": float(p.sum(1).mean())}
@@ -680,13 +680,13 @@ def run_one_split_trial(scores, gt, seed):
         ]
     )
 
-    # Resumos condicionais
+    # Conditional summaries
     cond = pd.concat(
         [conditional_by_bin(p, tl, tb, N_BINS, k) for k, p in preds.items()],
         ignore_index=True,
     )
 
-    # Lambdas por bin
+    # Lambdas by bin
     adapt_rows = []
     for k in preds:
         if lam_img[k] is not None:
@@ -732,7 +732,7 @@ def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS):
 
 
 # ============================================================================
-# 12. RESUMOS AGREGADOS E VISUALIZAÇÕES
+# 12. AGGREGATED SUMMARIES AND VISUALIZATIONS
 # ============================================================================
 
 
@@ -863,7 +863,7 @@ def plot_conditional_coverage(df_conditional):
 
 
 # ============================================================================
-# ARGUMENTOS
+# ARGUMENTS
 # ============================================================================
 
 
@@ -897,26 +897,26 @@ def main(args=None):
     print("=" * 80)
     print()
 
-    # Carrega dados
+    # Load data
     print("Carregando dados...")
     sgmd, labels = load_data()
     print()
 
-    # Split único com sanity check
+    # Single split with sanity check
     print("Executando split único...")
     results, test_bins, test_labels = run_single_split(sgmd, labels)
     print()
 
-    # Múltiplos trials
+    # Multiple trials
     print("Executando múltiplos trials...")
     df_marginal, df_conditional, df_adapt = run_multiple_trials(sgmd, labels, n_trials=N_TRIALS)
     print()
 
-    # Agregação
+    # Aggregation
     summary, per_trial = aggregate_results(df_marginal, df_conditional, df_adapt)
     print()
 
-    # Diretório de resultados
+    # Results directory
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if args.output_dir is not None:
         results_dir = str(Path(args.output_dir) / f"experiment_4_rcv1_text_{timestamp}")
@@ -928,20 +928,20 @@ def main(args=None):
     Path(results_dir).mkdir(parents=True, exist_ok=True)
     print(f"\nSalvando resultados em: {results_dir}")
 
-    # Salvar DataFrames
+    # Save DataFrames
     df_marginal.to_csv(os.path.join(results_dir, "df_marginal.csv"), index=False)
     df_conditional.to_csv(os.path.join(results_dir, "df_conditional.csv"), index=False)
     df_adapt.to_csv(os.path.join(results_dir, "df_adapt.csv"), index=False)
     summary.to_csv(os.path.join(results_dir, "summary.csv"), index=False)
     per_trial.to_csv(os.path.join(results_dir, "per_trial.csv"), index=False)
 
-    # Salvar arrays/objetos auxiliares
+    # Save auxiliary arrays/objects
     try:
         np.savez_compressed(os.path.join(results_dir, "extras.npz"), test_bins=test_bins, test_labels=test_labels)
     except Exception:
         pass
 
-    # Salvar metadados
+    # Save metadata
     meta = {
         "timestamp": timestamp,
         "alpha": float(ALPHA),
@@ -954,7 +954,7 @@ def main(args=None):
     with open(os.path.join(results_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Visualizações: gerar, salvar e fechar
+    # Visualizations: generate, save, and close
     print("Gerando e salvando figuras...")
     try:
         fig = plot_results(df_marginal, per_trial, test_labels)
