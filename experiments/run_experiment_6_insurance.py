@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Experiment 6: Medical Insurance — CRC marginal vs AA-CRC-linear (D u C) vs ReCIRC-TabICL.
+"""Experiment 6: Medical Insurance — marginal CRC vs AA-CRC-linear (D u C) vs ReCIRC-TabICL.
 
 This script reproduces the logic from the Experiment 6 notebook in a standalone
 Python script. It uses the Medical Insurance dataset (1,338 x 6 mixed features,
 target = annual medical charges) and compares three risk-control methods on top
 of a quantile random forest (QRF) base predictor:
 
-- CRC marginal: a single global lambda calibrated on the calibration split C.
+- Marginal CRC: a single global lambda calibrated on the calibration split C.
 - AA-CRC-linear (D u C): a locally adaptive rule lambda(x) = Phi(x)^T beta fitted
   by least squares, whose offset is calibrated on the union D u C. This variant
   deliberately gives the linear baseline *more* data than the standard protocol.
@@ -72,7 +72,7 @@ def ensure_packages():
             except subprocess.CalledProcessError:
                 if required:
                     raise
-                print(f"aviso: não foi possível instalar {pip_name} (pacote opcional).")
+                print(f"warning: could not install {pip_name} (optional package).")
 
 
 ensure_packages()
@@ -95,7 +95,7 @@ try:
     HAS_TABICL = True
 except Exception as _tabicl_import_error:  # pragma: no cover - environment dependent
     HAS_TABICL = False
-    print("aviso: tabicl indisponível —", _tabicl_import_error)
+    print("warning: tabicl unavailable —", _tabicl_import_error)
 
 
 # -----------------------------------------------------------------------------
@@ -154,7 +154,7 @@ else:
     OUT_DIR = "insurance_crc_aacrc_dcupc_recirc_tabicl_results"
 
 # Method labels (kept stable across CSV outputs and figures).
-METHOD_CRC = "CRC marginal"
+METHOD_CRC = "Marginal CRC"
 METHOD_AACRC = "AA-CRC (D∪C)"
 METHOD_RECIRC_TABICL = "ReCIRC-TabICL"
 METHOD_RECIRC_HGB = "ReCIRC-HGB"
@@ -824,16 +824,16 @@ def save_plots(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experimento 6: Medical Insurance — CRC marginal vs AA-CRC-linear (D∪C) vs ReCIRC."
+        description="Experiment 6: Medical Insurance — marginal CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
     )
-    parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
-    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
-    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Seed base para randomização.")
-    parser.add_argument("--alpha", type=float, default=ALPHA, help="Nível de risco alvo.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory in which to save results.")
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Number of experiment trials.")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base seed for randomization.")
+    parser.add_argument("--alpha", type=float, default=ALPHA, help="Target risk level.")
     parser.add_argument(
-        "--risk-model", type=str, default=RISK_MODEL, choices=["tabicl", "hgb"], help="Modelo para ReCIRC."
+        "--risk-model", type=str, default=RISK_MODEL, choices=["tabicl", "hgb"], help="Model for ReCIRC."
     )
-    parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
     return parser.parse_args()
 
 
@@ -852,10 +852,10 @@ def main():
     use_recirc = True
     if risk_model == "tabicl" and not HAS_TABICL:
         if FALLBACK_TO_HGB_IF_TABICL_FAILS:
-            warnings.warn("TabICL indisponível; usando HGB no braço ReCIRC.")
+            warnings.warn("TabICL unavailable; using HGB for the ReCIRC arm.")
             risk_model = "hgb"
         else:
-            warnings.warn("TabICL indisponível; o braço ReCIRC será omitido.")
+            warnings.warn("TabICL unavailable; the ReCIRC arm will be omitted.")
             use_recirc = False
 
     data = load_insurance()
@@ -894,7 +894,7 @@ def main():
     df_slices = pd.DataFrame(rows_slice)
 
     elapsed = time.time() - t0
-    print(f"\ntotal: {elapsed:.0f}s | gap D→T médio (CRC marginal): {np.mean(gaps):+.3f}")
+    print(f"\ntotal: {elapsed:.0f}s | mean D→T gap (marginal CRC): {np.mean(gaps):+.3f}")
 
     df_marginal.to_csv(output_dir / "marginal_results.csv", index=False)
     df_conditional.to_csv(output_dir / "conditional_results.csv", index=False)
@@ -910,22 +910,22 @@ def main():
     compact.to_csv(output_dir / "compact_summary.csv", index=False)
     paired.to_csv(output_dir / "paired_comparisons.csv", index=False)
 
-    print("\nResumo por método:")
+    print("\nSummary by method:")
     print(summary.round(4).to_string(index=False))
     print("\nTabela compacta:")
     print(compact.to_string(index=False))
 
     if len(paired):
-        print("\nComparações pareadas (negativo = primeiro método melhor):")
+        print("\nPaired comparisons (negative = first method is better):")
         for _, r in paired.iterrows():
             print(
                 f"  [{r['metric']}] {r['comparison']}: {r['mean_diff']:+.4f}±{r['sd_diff']:.4f} | "
-                f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
+                f"first is better in {r['win_rate_first'] * 100:.0f}% of trials"
             )
 
     if not args.no_plots:
         save_plots(df_marginal, df_conditional, str(output_dir), n_obs=data.n, alpha=alpha)
-        print(f"\nGráficos salvos em: {output_dir}")
+        print(f"\nPlots saved to: {output_dir}")
 
     meta = {
         "alpha": float(alpha),
@@ -954,7 +954,7 @@ def main():
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nResultados salvos em: {output_dir}")
+    print(f"\nResults saved to: {output_dir}")
 
 
 if __name__ == "__main__":

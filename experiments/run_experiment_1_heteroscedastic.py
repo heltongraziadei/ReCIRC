@@ -77,7 +77,7 @@ try:
     from multiaccurate_cp.utils.multiaccurate import J, J_prime
 except ImportError as exc:
     searched = ", ".join(str(path) for path in AACRC_CANDIDATES if path is not None)
-    raise ImportError(f"AA-CRC não encontrado. Caminhos verificados: {searched}") from exc
+    raise ImportError(f"AA-CRC not found. Paths checked: {searched}") from exc
 
 
 B_LOSS = 1.0
@@ -102,7 +102,7 @@ METHOD_COLORS = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Experimento sintético heteroscedástico.")
+    parser = argparse.ArgumentParser(description="Synthetic heteroscedastic experiment.")
     parser.add_argument("--trials", type=int, default=20)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--n-train", type=int, default=500)
@@ -244,7 +244,7 @@ def validate_pseudo_reduction(lambda_max):
     exact = bounded_excess_loss(residual[:, None], lam[None, :])
     error = np.abs(approximate - exact)
     if error.max() > 1.0 / AACRC_N_PSEUDO + 1e-12:
-        raise AssertionError("Falha na redução pseudo-label do AA-CRC.")
+        raise AssertionError("AA-CRC pseudo-label reduction failed.")
     return float(error.max()), float(error.mean())
 
 
@@ -278,7 +278,7 @@ def fit_aacrc(x, residual, lambda_grid, alpha):
         if np.all(np.isfinite(result.x)):
             theta = result.x.copy()
     if result is None or not valid:
-        raise RuntimeError("AA-CRC falhou: " + " | ".join(attempts))
+        raise RuntimeError("AA-CRC failed: " + " | ".join(attempts))
     return {
         "theta": result.x,
         "scaler": scaler,
@@ -458,7 +458,7 @@ def package_version(name):
 def main():
     args = parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA solicitada, mas não está disponível.")
+        raise RuntimeError("CUDA was requested but is not available.")
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device == "auto":
         device = "cpu"
@@ -522,8 +522,8 @@ def main():
 
     print("\nSummary")
     print(summary.round(4).to_string(index=False))
-    print(f"\nTempo total: {time.time() - start:.1f}s")
-    print(f"Resultados: {args.output_dir.resolve()}")
+    print(f"\nTotal time: {time.time() - start:.1f}s")
+    print(f"Results: {args.output_dir.resolve()}")
 
 
 if __name__ == "__main__":

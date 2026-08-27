@@ -363,7 +363,7 @@ def make_tabicl_regressor():
         try:
             from tabicl.sklearn import TabICLRegressor
         except Exception as e:
-            raise ImportError("Não consegui importar TabICLRegressor. Tente: pip install tabicl") from e
+            raise ImportError("Could not import TabICLRegressor. Try: pip install tabicl") from e
 
     try:
         return TabICLRegressor()
@@ -419,7 +419,7 @@ def fit_risk_estimator(F_risk: np.ndarray, ranks_risk: np.ndarray, seed: int, K_
         except Exception as e:
             if not FALLBACK_TO_HGB_IF_TABICL_FAILS:
                 raise
-            warnings.warn(f"TabICL falhou; usando HGB. Erro: {repr(e)}")
+            warnings.warn(f"TabICL failed; using HGB. Error: {repr(e)}")
             model = HistGradientBoostingRegressor(
                 max_iter=120,
                 learning_rate=0.06,
@@ -669,7 +669,7 @@ def save_plots(summary_rows: List[Dict], bin_rows: List[Dict], output_dir: str, 
     plt.axhline(alpha, linestyle="--", linewidth=1)
     plt.xlabel("Trial")
     plt.ylabel("Marginal test risk")
-    plt.title("Risco marginal por trial")
+    plt.title("Marginal risk by trial")
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "marginal_risk_by_trial.png"), dpi=160)
@@ -685,7 +685,7 @@ def save_plots(summary_rows: List[Dict], bin_rows: List[Dict], output_dir: str, 
     plt.axhline(alpha, linestyle="--", linewidth=1)
     plt.xticks(xpos, methods, rotation=20, ha="right")
     plt.ylabel("Mean test risk")
-    plt.title("Risco marginal médio acumulado")
+    plt.title("Cumulative mean marginal risk")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "marginal_risk_by_method.png"), dpi=160)
     plt.close()
@@ -698,7 +698,7 @@ def save_plots(summary_rows: List[Dict], bin_rows: List[Dict], output_dir: str, 
         plt.axhline(alpha, linestyle="--", linewidth=1)
         plt.xlabel("Difficulty bin")
         plt.ylabel("Mean bin risk")
-        plt.title("Risco por bin de dificuldade")
+        plt.title("Risk by difficulty bin")
         plt.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "bin_risk_curves.png"), dpi=160)
@@ -710,7 +710,7 @@ def save_plots(summary_rows: List[Dict], bin_rows: List[Dict], output_dir: str, 
             plt.plot(sub["bin"], sub["avg_set_size_mean"], marker="o", label=method)
         plt.xlabel("Difficulty bin")
         plt.ylabel("Average set size")
-        plt.title("Tamanho médio por bin de dificuldade")
+        plt.title("Mean size by difficulty bin")
         plt.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "bin_set_size_curves.png"), dpi=160)
@@ -792,12 +792,12 @@ def build_final_summary(summary_df: pd.DataFrame, bin_df: pd.DataFrame):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Experimento 5: Letter Recognition — CRC vs AA-CRC-style vs ReCIRC.")
-    parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
-    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
-    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Seed base para randomização.")
-    parser.add_argument("--risk-model", type=str, default=RISK_MODEL, choices=["tabicl", "hgb"], help="Modelo para ReCIRC.")
-    parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser = argparse.ArgumentParser(description="Experiment 5: Letter Recognition — CRC vs AA-CRC-style vs ReCIRC.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory in which to save results.")
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Number of experiment trials.")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base seed for randomization.")
+    parser.add_argument("--risk-model", type=str, default=RISK_MODEL, choices=["tabicl", "hgb"], help="Model for ReCIRC.")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
     return parser.parse_args()
 
 
@@ -852,14 +852,14 @@ def main():
     bins_by_method.to_csv(output_dir / "bins_by_method_all_trials.csv", index=False)
     compact_table.to_csv(output_dir / "compact_summary_all_trials.csv", index=False)
 
-    print("\nResumo por método:")
+    print("\nSummary by method:")
     print(summary_by_method.round(4).to_string(index=False))
     print("\nTabela compacta:")
     print(compact_table.to_string(index=False))
 
     if not args.no_plots:
         save_plots(all_summary_rows, all_bin_rows, str(output_dir))
-        print(f"\nGráficos salvos em: {output_dir}")
+        print(f"\nPlots saved to: {output_dir}")
 
     meta = {
         "alpha": float(ALPHA),
@@ -871,7 +871,7 @@ def main():
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nResultados salvos em: {output_dir}")
+    print(f"\nResults saved to: {output_dir}")
 
 
 if __name__ == "__main__":

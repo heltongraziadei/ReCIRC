@@ -76,7 +76,7 @@ def ensure_packages():
             except subprocess.CalledProcessError:
                 if required:
                     raise
-                print(f"aviso: não foi possível instalar {pip_name} (pacote opcional).")
+                print(f"warning: could not install {pip_name} (optional package).")
 
 
 ensure_packages()
@@ -99,7 +99,7 @@ try:
     HAS_TABICL = True
 except Exception as _tabicl_import_error:  # pragma: no cover - environment dependent
     HAS_TABICL = False
-    print("aviso: tabicl indisponível —", _tabicl_import_error)
+    print("warning: tabicl unavailable —", _tabicl_import_error)
 
 
 # -----------------------------------------------------------------------------
@@ -201,9 +201,9 @@ def load_superconductor(cache_file: str = "./data_superconductor/train.csv") -> 
                 ok = True
                 break
             except Exception as e:
-                print("  falhou:", str(e)[:70])
+                print("  failed:", str(e)[:70])
         if not ok:
-            raise RuntimeError("não consegui baixar o Superconductor")
+            raise RuntimeError("could not download the Superconductor dataset")
 
         with zipfile.ZipFile(zp) as zf:
             zf.extractall(wd)
@@ -214,7 +214,7 @@ def load_superconductor(cache_file: str = "./data_superconductor/train.csv") -> 
                 if f == "train.csv":
                     train_path = os.path.join(r, f)
         if train_path is None:
-            raise RuntimeError("train.csv não encontrado no arquivo baixado")
+            raise RuntimeError("train.csv not found in the downloaded archive")
 
         pd.read_csv(train_path).to_csv(cache_file, index=False)
 
@@ -223,7 +223,7 @@ def load_superconductor(cache_file: str = "./data_superconductor/train.csv") -> 
     X = df.drop(columns=["critical_temp"]).to_numpy(np.float32)
     names = list(df.drop(columns=["critical_temp"]).columns)
     print(
-        f"Superconductor: {X.shape[0]} × {X.shape[1]} | temp_crit med={np.median(y):.1f} máx={y.max():.1f}"
+        f"Superconductor: {X.shape[0]} × {X.shape[1]} | median temp_crit={np.median(y):.1f} max={y.max():.1f}"
     )
     return X, y, names
 
@@ -826,23 +826,23 @@ def save_plots(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experimento de mecanismo Superconductor: CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
+        description="Superconductor mechanism experiment: CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
     )
-    parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
-    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
-    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Seed base para randomização dos splits.")
-    parser.add_argument("--alpha", type=float, default=ALPHA, help="Nível de risco alvo.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory in which to save results.")
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Number of experiment trials.")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base seed for split randomization.")
+    parser.add_argument("--alpha", type=float, default=ALPHA, help="Target risk level.")
     parser.add_argument(
-        "--slice-bins", type=int, default=N_SLICE_BINS, help="Bins por feature na definição dos slices."
+        "--slice-bins", type=int, default=N_SLICE_BINS, help="Bins per feature in the slice definition."
     )
     parser.add_argument(
         "--risk-model",
         type=str,
         default=RISK_BACKEND,
         choices=["tabicl", "histgb"],
-        help="Backbone do regressor de risco do ReCIRC.",
+        help="Backbone for the ReCIRC risk regressor.",
     )
-    parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
     return parser.parse_args()
 
 
@@ -858,13 +858,13 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if backend == "tabicl" and not HAS_TABICL:
-        print("tabicl indisponível -> histgb")
+        print("tabicl unavailable -> histgb")
         backend = "histgb"
     if backend == "tabicl" and TABICL_DEVICE == "cpu":
-        warnings.warn("TabICL em CPU (sem GPU) — lento. Colab: Runtime → Change runtime type → GPU.")
+        warnings.warn("TabICL on CPU (without GPU) — slow. Colab: Runtime → Change runtime type → GPU.")
 
     print(
-        f"config OK | regressor de risco: {backend} | device: {TABICL_DEVICE if backend == 'tabicl' else 'n/a'}"
+        f"config OK | risk regressor: {backend} | device: {TABICL_DEVICE if backend == 'tabicl' else 'n/a'}"
     )
 
     X, Y, names = load_superconductor()
@@ -910,16 +910,16 @@ def main():
     print(compact.to_string(index=False))
 
     if len(paired):
-        print("\nComparações pareadas (negativo = primeiro método melhor):")
+        print("\nPaired comparisons (negative = first method is better):")
         for _, r in paired.iterrows():
             print(
                 f"  [{r['metric']}] {r['comparison']}: {r['mean_diff']:+.4f}±{r['sd_diff']:.4f} | "
-                f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
+                f"first is better in {r['win_rate_first'] * 100:.0f}% of trials"
             )
 
     if not args.no_plots:
         save_plots(df, df_slices, str(output_dir), slice_features=slice_features, alpha=alpha)
-        print(f"\nGráficos salvos em: {output_dir}")
+        print(f"\nPlots saved to: {output_dir}")
 
     meta = {
         "experiment": "mechanism_superconductor",
@@ -949,7 +949,7 @@ def main():
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nResultados salvos em: {output_dir}")
+    print(f"\nResults saved to: {output_dir}")
 
 
 if __name__ == "__main__":

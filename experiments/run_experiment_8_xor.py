@@ -76,7 +76,7 @@ def ensure_packages():
             except subprocess.CalledProcessError:
                 if required:
                     raise
-                print(f"aviso: não foi possível instalar {pip_name} (pacote opcional).")
+                print(f"warning: could not install {pip_name} (optional package).")
 
 
 ensure_packages()
@@ -99,7 +99,7 @@ try:
     HAS_TABICL = True
 except Exception as _tabicl_import_error:  # pragma: no cover - environment dependent
     HAS_TABICL = False
-    print("aviso: tabicl indisponível —", _tabicl_import_error)
+    print("warning: tabicl unavailable —", _tabicl_import_error)
 
 
 # -----------------------------------------------------------------------------
@@ -768,22 +768,22 @@ def save_plots(df: pd.DataFrame, df_slices: pd.DataFrame, output_dir: str, alpha
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experimento de mecanismo XOR: CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
+        description="XOR mechanism experiment: CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
     )
-    parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
-    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
-    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Seed base para randomização dos splits.")
-    parser.add_argument("--alpha", type=float, default=ALPHA, help="Nível de risco alvo.")
-    parser.add_argument("--n-samples", type=int, default=N_SAMPLES, help="Tamanho do dataset sintético XOR.")
-    parser.add_argument("--data-seed", type=int, default=DATA_SEED, help="Seed do gerador XOR (dataset fixo).")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory in which to save results.")
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Number of experiment trials.")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base seed for split randomization.")
+    parser.add_argument("--alpha", type=float, default=ALPHA, help="Target risk level.")
+    parser.add_argument("--n-samples", type=int, default=N_SAMPLES, help="Size of the synthetic XOR dataset.")
+    parser.add_argument("--data-seed", type=int, default=DATA_SEED, help="XOR generator seed (fixed dataset).")
     parser.add_argument(
         "--risk-model",
         type=str,
         default=RISK_BACKEND,
         choices=["tabicl", "histgb"],
-        help="Backbone do regressor de risco do ReCIRC.",
+        help="Backbone for the ReCIRC risk regressor.",
     )
-    parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
     return parser.parse_args()
 
 
@@ -799,13 +799,13 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if backend == "tabicl" and not HAS_TABICL:
-        print("tabicl indisponível -> histgb")
+        print("tabicl unavailable -> histgb")
         backend = "histgb"
     if backend == "tabicl" and TABICL_DEVICE == "cpu":
-        warnings.warn("TabICL em CPU (sem GPU) — lento. Colab: Runtime → Change runtime type → GPU.")
+        warnings.warn("TabICL on CPU (without GPU) — slow. Colab: Runtime → Change runtime type → GPU.")
 
     print(
-        f"config OK | regressor de risco: {backend} | device: {TABICL_DEVICE if backend == 'tabicl' else 'n/a'}"
+        f"config OK | risk regressor: {backend} | device: {TABICL_DEVICE if backend == 'tabicl' else 'n/a'}"
     )
 
     X, Y = make_xor(args.n_samples, seed=args.data_seed)
@@ -854,16 +854,16 @@ def main():
     print(compact.to_string(index=False))
 
     if len(paired):
-        print("\nComparações pareadas (negativo = primeiro método melhor):")
+        print("\nPaired comparisons (negative = first method is better):")
         for _, r in paired.iterrows():
             print(
                 f"  [{r['metric']}] {r['comparison']}: {r['mean_diff']:+.4f}±{r['sd_diff']:.4f} | "
-                f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
+                f"first is better in {r['win_rate_first'] * 100:.0f}% of trials"
             )
 
     if not args.no_plots:
         save_plots(df, df_slices, str(output_dir), alpha=alpha)
-        print(f"\nGráficos salvos em: {output_dir}")
+        print(f"\nPlots saved to: {output_dir}")
 
     meta = {
         "experiment": "mechanism_xor",
@@ -892,7 +892,7 @@ def main():
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nResultados salvos em: {output_dir}")
+    print(f"\nResults saved to: {output_dir}")
 
 
 if __name__ == "__main__":
