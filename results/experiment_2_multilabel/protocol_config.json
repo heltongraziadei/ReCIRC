@@ -5,7 +5,7 @@
     "trials": 20,
     "seed": 2026,
     "dgp_seed": 123,
-    "n_context": 500,
+    "n_context": 1000,
     "n_cal": 500,
     "n_test": 1000,
     "labels": 50,
@@ -16,18 +16,18 @@
     "bins": 5,
     "n_mc_oracle": 200,
     "skip_oracle": false,
-    "device": "cuda",
-    "output_dir": "/content/drive/MyDrive/PythonReCIRC/results/multilabel_script",
+    "device": "auto",
+    "output_dir": "/content/drive/MyDrive/PythonReCIRC/results/experiment_multilabel",
     "no_plots": false,
     "device_resolved": "cuda"
   },
   "aacrc_commit": "64504c011ac2db910e258037e48170a63381b5e6",
   "package_versions": {
-    "numpy": "2.0.2",
-    "pandas": "2.2.2",
+    "numpy": "2.1.3",
+    "pandas": "2.2.3",
     "scipy": "1.16.3",
     "scikit-learn": "1.6.1",
-    "tabicl": "2.1.1",
+    "tabicl": "2.2.0",
     "torch": "2.11.0+cu128"
   }
 }
