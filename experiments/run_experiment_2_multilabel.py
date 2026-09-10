@@ -75,7 +75,7 @@ try:
     from multiaccurate_cp.utils.multiaccurate import J, J_prime
 except ImportError as exc:
     searched = ", ".join(str(path) for path in AACRC_CANDIDATES if path is not None)
-    raise ImportError(f"AA-CRC not found. Paths checked: {searched}") from exc
+    raise ImportError(f"AA-CRC não encontrado. Caminhos verificados: {searched}") from exc
 
 
 B_LOSS = 1.0
@@ -108,11 +108,11 @@ FEATURE_COLUMNS = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Synthetic multilabel experiment.")
+    parser = argparse.ArgumentParser(description="Experimento sintético multilabel.")
     parser.add_argument("--trials", type=int, default=20)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--dgp-seed", type=int, default=123)
-    parser.add_argument("--n-context", type=int, default=500)
+    parser.add_argument("--n-context", type=int, default=1000)
     parser.add_argument("--n-cal", type=int, default=500)
     parser.add_argument("--n-test", type=int, default=1000)
     parser.add_argument("--labels", type=int, default=50)
@@ -307,7 +307,7 @@ def fit_aacrc(data, alpha):
         if np.all(np.isfinite(result.x)):
             theta = result.x.copy()
     if result is None or not valid:
-        raise RuntimeError("AA-CRC failed: " + " | ".join(attempts))
+        raise RuntimeError("AA-CRC falhou: " + " | ".join(attempts))
     return {
         "theta": result.x,
         "scaler": scaler,
@@ -332,7 +332,7 @@ def validate_aacrc_mapping(data):
         experiment_loss = missed_positive_loss(data["scores"], data["y"], 1.0 - threshold)
         error = max(error, float(np.abs(aacrc_loss - experiment_loss).max()))
     if error > 1e-12:
-        raise AssertionError(f"Invalid AA-CRC mapping: {error:.3e}")
+        raise AssertionError(f"Mapeamento AA-CRC inválido: {error:.3e}")
     return error
 
 
@@ -523,9 +523,9 @@ def package_version(name):
 def main():
     args = parse_args()
     if args.labels < 5:
-        raise ValueError("--labels must be at least 5.")
+        raise ValueError("--labels deve ser pelo menos 5.")
     if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
+        raise RuntimeError("CUDA solicitada, mas não está disponível.")
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device == "auto":
         device = "cpu"
@@ -596,8 +596,8 @@ def main():
     print(summary.round(4).to_string(index=False))
     print("\nPaired differences")
     print(paired.round(4).to_string(index=False))
-    print(f"\nTotal time: {time.time() - start:.1f}s")
-    print(f"Results: {args.output_dir.resolve()}")
+    print(f"\nTempo total: {time.time() - start:.1f}s")
+    print(f"Resultados: {args.output_dir.resolve()}")
 
 
 if __name__ == "__main__":

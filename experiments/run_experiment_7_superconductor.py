@@ -1,44 +1,36 @@
 #!/usr/bin/env python
-"""Superconductor mechanism: ReCIRC-TabICL vs AA-CRC-linear (D u C) vs marginal CRC.
+"""Superconductor: CRC, authors' AA-CRC objective, and ReCIRC.
 
-This script reproduces the logic from the Superconductor mechanism notebook in a
-standalone Python script. It is the realistic counterpart of the XOR probe: the
-UCI Superconductivity dataset has ~21,263 materials and 81 physical features,
-with the critical temperature as target. Predictability may vary non-linearly
-across families of materials, but no simple interaction is declared as in the
-XOR generator — so this is a less controlled, more realistic test of the same
-thesis: ReCIRC estimates R(x, lambda) with a flexible regressor while
-AA-CRC-linear stays restricted to the class lambda(x) = Phi(x)^T beta.
+Uses J and J_prime from the pinned local AA-CRC repository with SLSQP.
+The exact asymmetric-loss encoding (weights 0.2, 0.8) is the same as in the
+XOR and insurance official-objective scripts: five auxiliary positive labels,
+one lower-tail and four upper-tail labels. The affine learned threshold is
+u(x); interval multipliers are max(0, -log(u)) for u > 0 and infinity otherwise.
+This is a task adaptation, not an unchanged authors' regression experiment.
 
-Evaluation slices are the 4x4 quantile-bin interactions of the two features most
-correlated with the target; they are never declared to any method.
+QRF and feature standardization use D; AA-CRC uses independent C with the
+sample correction 1/len(C). There is no least-squares surrogate or subsequent
+scalar-offset calibration. AA-CRC multipliers are continuous and unbounded.
+CRC/ReCIRC retain the previous finite lambda grid and ReCIRC's fixed 201-point
+budget grid on [0, 1], including their inherited finite-grid fallback.
 
-Arms compared (identical splits, paired comparisons):
+Evaluation retains the original 4x4 feature-bin slices. The two slicing
+features are selected using full-dataset target correlations; these are
+exploratory, target-selected slices, not independently specified subgroups.
+The slice definitions are never used for fitting or calibrating any method.
 
-- CRC: a single global lambda calibrated on the calibration split C.
-- AA-CRC-lin (D u C): lambda(x) = Phi(x)^T beta fitted by least squares on the
-  union D u C, with a global shift also calibrated on D u C. This variant
-  deliberately gives the linear baseline more data than the standard protocol.
-- ReCIRC: the risk surface R(x, lambda) is estimated directly with TabICL
-  (context = D, subsampled to N_D_TABICL rows) and the risk budget is calibrated
-  on C.
-
-The controlled loss is the asymmetric miscoverage loss
-    L_lambda(x, y) = w_neg * 1{y < q_med - lambda * s_neg}
-                   + w_pos * 1{y > q_med + lambda * s_pos},
-with (w_neg, w_pos) = (0.2, 0.8) and s_neg, s_pos the lower/upper QRF scales.
-
-Reported metrics: marginal risk, average interval width, worst-slice risk,
-slice CVaR (mean of the top decile of slices), mean positive slice excess, and
-the fraction of slices exceeding alpha.
+Results go to a separate directory. Original scripts and author source are
+preserved. --self-check needs only NumPy/SciPy; --no-recirc omits ReCIRC
+explicitly. Packages are never installed automatically.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -48,38 +40,206 @@ import zipfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+from scipy.optimize import minimize
 
-# Install required packages automatically
-def ensure_packages():
-    """Install required packages if they are not available.
-
-    ``tabicl`` is treated as optional: if its installation fails the script still
-    runs with the HistGB backend.
-    """
-    packages = {
-        "numpy": ("numpy", True),
-        "pandas": ("pandas", True),
-        "scipy": ("scipy", True),
-        "sklearn": ("scikit-learn", True),
-        "matplotlib": ("matplotlib", True),
-        "quantile_forest": ("quantile-forest", True),
-        "tabicl": ("tabicl", False),
-    }
-
-    for import_name, (pip_name, required) in packages.items():
-        try:
-            __import__(import_name)
-        except ImportError:
-            print(f"Instalando {pip_name}...")
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pip_name])
-            except subprocess.CalledProcessError:
-                if required:
-                    raise
-                print(f"warning: could not install {pip_name} (optional package).")
+AACRC_COMMIT = "64504c011ac2db910e258037e48170a63381b5e6"
+AACRC_SOURCE_SHA256 = "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315"
+AACRC_REPO = Path(__file__).resolve().parents[1] / "AA-CRC"
+AACRC_INTEGRATION = "serial"
+AACRC_RIDGE = 0.01
+AACRC_MAXITER = 200
+AACRC_OUTPUT_DIR = None
+AACRC_MODULE = None
 
 
-ensure_packages()
+def load_original_aacrc(repo, integration="serial"):
+    """Load the pinned authors' module; optionally select its own serial helper."""
+    if integration not in {"serial", "parallel"}:
+        raise ValueError("integration must be 'serial' or 'parallel'.")
+    repo = Path(repo).resolve()
+    path = repo / "multiaccurate_cp" / "utils" / "multiaccurate.py"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"AA-CRC source missing: {path}. Clone vincentblot28/AA-CRC, "
+            f"checkout {AACRC_COMMIT}, and pass --aacrc-repo PATH."
+        )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != AACRC_SOURCE_SHA256:
+        raise RuntimeError(f"Unexpected AA-CRC source SHA-256: {digest}; expected {AACRC_SOURCE_SHA256}.")
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    module = importlib.import_module("multiaccurate_cp.utils.multiaccurate")
+    if Path(module.__file__).resolve() != path:
+        raise RuntimeError("Another multiaccurate_cp module is already loaded; use a fresh Python process.")
+    if not hasattr(module, "_original_parallel_integrals"):
+        module._original_parallel_integrals = module._I_vec_multi_proc
+    module._I_vec_multi_proc = (
+        module._I_vec_multi_proc2 if integration == "serial" else module._original_parallel_integrals
+    )
+    return module
+
+
+def auxiliary_tail_labels(y, median, s_neg, s_pos):
+    """Exact 1:4 binary-label reduction of the (0.2, 0.8) asymmetric loss."""
+    y, median, s_neg, s_pos = [np.asarray(v, dtype=float) for v in (y, median, s_neg, s_pos)]
+    if not (y.ndim == 1 and y.shape == median.shape == s_neg.shape == s_pos.shape):
+        raise ValueError("Expected equally sized one-dimensional response and QRF arrays.")
+    if not all(np.isfinite(v).all() for v in (y, median, s_neg, s_pos)):
+        raise ValueError("Responses and QRF arrays must be finite.")
+    if np.any(s_neg <= 0) or np.any(s_pos <= 0):
+        raise ValueError("QRF scales must be strictly positive.")
+    residuals = np.column_stack([(median - y) / s_neg, (y - median) / s_pos])
+    tail_scores = np.full(residuals.shape, np.inf)
+    positive = residuals > 0
+    tail_scores[positive] = np.exp(-residuals[positive])
+    if np.any(tail_scores[positive] == 0):
+        raise FloatingPointError("Exponential score underflow; rescale/review the QRF scaffold before fitting.")
+    scores = tail_scores[:, [0, 1, 1, 1, 1]]
+    labels = [np.ones((5, 1), dtype=float) for _ in y]
+    return labels, [row[:, None].copy() for row in scores]
+
+
+def multiplier_from_aacrc_threshold(u):
+    u = np.asarray(u, dtype=float)
+    if not np.isfinite(u).all():
+        raise ValueError("AA-CRC score thresholds must be finite.")
+    lam = np.full(u.shape, np.inf)
+    positive = u > 0
+    lam[positive] = np.maximum(0.0, -np.log(u[positive]))
+    return lam
+
+
+def evaluate_aacrc_intervals(y, median, s_neg, s_pos, u):
+    lam = multiplier_from_aacrc_threshold(u)
+    lo = np.asarray(median, float) - lam * np.asarray(s_neg, float)
+    hi = np.asarray(median, float) + lam * np.asarray(s_pos, float)
+    loss = 0.2 * (np.asarray(y) < lo) + 0.8 * (np.asarray(y) > hi)
+    return loss, hi - lo, lam
+
+
+def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
+                       alpha=0.1, ridge=0.01, maxiter=200, module=None,
+                       diagnostic_path=None):
+    """Optimize the original regularized AA-CRC objective on independent C."""
+    if module is None:
+        module = load_original_aacrc(AACRC_REPO, AACRC_INTEGRATION)
+    n = len(y_C)
+    if not 0 < alpha < 1 or n <= 1.0 / alpha:
+        raise ValueError("Need 0 < alpha < 1 and len(C) > 1/alpha for this AA-CRC fit.")
+    if ridge < 0 or maxiter < 1:
+        raise ValueError("ridge must be nonnegative and maxiter positive.")
+    center = np.asarray(X_D, float).mean(axis=0)
+    scale = np.asarray(X_D, float).std(axis=0)
+    scale = np.where(scale > 0, scale, 1.0)
+    phi = np.column_stack([np.ones(n), (np.asarray(X_C, float) - center) / scale])
+    labels, scores = auxiliary_tail_labels(y_C, median_C, s_neg_C, s_pos_C)
+    theta = np.zeros(phi.shape[1])
+    theta[0] = 0.5
+    regularization = "ridge" if ridge > 0 else None
+    arguments = (labels, scores, phi, alpha, n, regularization, ridge)
+    attempts = []
+    start = time.time()
+    success = False
+    for iterations in (maxiter, 3 * maxiter):
+        result = minimize(module.J, theta, method="SLSQP", jac=module.J_prime,
+                          args=arguments, tol=1e-8,
+                          options={"maxiter": iterations, "disp": False})
+        success = bool(result.success and np.isfinite(result.x).all() and np.isfinite(result.fun))
+        attempts.append({"success": success, "status": int(result.status),
+                         "message": str(result.message), "iterations": int(result.nit),
+                         "objective": float(result.fun) if np.isfinite(result.fun) else None})
+        if success:
+            break
+        if np.isfinite(result.x).all():
+            theta = result.x.copy()
+    diag = {"source_commit": AACRC_COMMIT, "source_sha256": AACRC_SOURCE_SHA256,
+            "fit_split": "C", "feature_standardization_split": "D", "n_fit": n,
+            "n_auxiliary_labels_per_observation": 5, "ridge": ridge,
+            "success": success, "attempts": attempts, "elapsed_seconds": time.time() - start}
+    if success:
+        theta = result.x.copy()
+        u = phi @ theta
+        if np.any(u < -module.INF_BORN_INT):
+            success = False
+            diag["success"] = False
+            diag["error"] = "Fitted thresholds reached the original objective's lower truncation."
+        loss, _, _ = evaluate_aacrc_intervals(y_C, median_C, s_neg_C, s_pos_C, u)
+        encoded_loss = module._I_prime_list(labels, scores, np.maximum(u, 0.0), alpha, n) + alpha - 1.0 / n
+        diag.update({"theta": theta.tolist(), "center": center.tolist(), "scale": scale.tolist(),
+                     "fit_risk": float(loss.mean()),
+                     "encoding_max_abs_error": float(np.max(np.abs(loss - encoded_loss))),
+                     "threshold_min": float(u.min()), "threshold_max": float(u.max())})
+        if diag["encoding_max_abs_error"] > 1e-10:
+            success = False
+            diag["success"] = False
+            diag["error"] = "Interval/auxiliary-label losses disagree (check numerical boundary ties)."
+    if diagnostic_path is not None:
+        Path(diagnostic_path).write_text(json.dumps(diag, indent=2, allow_nan=False))
+    if not success:
+        raise RuntimeError("Original AA-CRC optimization failed: " + json.dumps(diag))
+    return {"theta": theta, "center": center, "scale": scale, "diagnostics": diag}
+
+
+def predict_original_aacrc(fit, X):
+    phi = np.column_stack([np.ones(len(X)), (np.asarray(X, float) - fit["center"]) / fit["scale"]])
+    return phi @ fit["theta"]
+
+
+def check_original_aacrc(repo):
+    """Offline loss-identity, quadrature, gradient and optimizer checks."""
+    module = load_original_aacrc(repo, "serial")
+    rng = np.random.default_rng(819)
+    n = 80
+    X_D, X_C = rng.normal(size=(120, 3)), rng.normal(size=(n, 3))
+    median = rng.normal(size=n)
+    s_neg, s_pos = rng.uniform(0.5, 2, size=(2, n))
+    y = median + rng.normal(size=n) * 1.5
+    y[0] = median[0]
+    labels, scores = auxiliary_tail_labels(y, median, s_neg, s_pos)
+    alpha = 0.2
+    max_loss_error = 0.0
+    for threshold in (-0.2, 0, 0.01, 0.2, 0.8, 1, 1.5, 3):
+        u = np.full(n, threshold)
+        direct, widths, _ = evaluate_aacrc_intervals(y, median, s_neg, s_pos, u)
+        encoded = module._I_prime_list(labels, scores, np.maximum(0, u), alpha, n) + alpha - 1 / n
+        err = float(np.max(np.abs(direct - encoded)))
+        max_loss_error = max(max_loss_error, err)
+        assert err < 1e-12, (threshold, err)
+        assert np.all(widths >= 0)
+    phi = np.column_stack([np.ones(n), X_C])
+    theta = np.array([0.4, 0.02, -0.01, 0.03])
+    u = phi @ theta
+    ridge = 0.01
+    score_table = np.stack([row.ravel() for row in scores])
+    target = alpha - 1 / n
+    exact = np.mean(np.maximum(u[:, None] - score_table, 0).mean(axis=1) - u * target)
+    exact -= module.INF_BORN_INT * target
+    exact += ridge * np.sum(theta ** 2)
+    numeric = module.J(theta, labels, scores, phi, alpha, n, "ridge", ridge)
+    quadrature_error = abs(float(numeric - exact))
+    assert quadrature_error < 0.005, quadrature_error
+    direct, _, _ = evaluate_aacrc_intervals(y, median, s_neg, s_pos, u)
+    expected_gradient = np.mean(phi * (direct - target)[:, None], axis=0) + 2 * ridge * theta
+    gradient = module.J_prime(theta, labels, scores, phi, alpha, n, "ridge", ridge)
+    assert np.allclose(gradient, expected_gradient, atol=1e-12)
+    fit = fit_original_aacrc(X_D, X_C, y, median, s_neg, s_pos, alpha=alpha, module=module)
+    test_u = predict_original_aacrc(fit, X_C[:8])
+    assert test_u.shape == (8,) and np.isfinite(test_u).all()
+    print(json.dumps({"loss_identity_max_error": max_loss_error,
+                      "official_quadrature_abs_error": quadrature_error,
+                      "gradient_check": "passed", "optimizer": fit["diagnostics"]}, indent=2))
+
+
+# This check deliberately runs before importing QRF, Torch or TabICL.
+if __name__ == "__main__" and "--self-check" in sys.argv:
+    check_parser = argparse.ArgumentParser(description="Offline validation of the original AA-CRC adaptation.")
+    check_parser.add_argument("--self-check", action="store_true")
+    check_parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
+    check_args = check_parser.parse_args()
+    check_original_aacrc(check_args.aacrc_repo)
+    raise SystemExit(0)
+
 
 import matplotlib
 
@@ -88,10 +248,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from quantile_forest import RandomForestQuantileRegressor
 from scipy.interpolate import PchipInterpolator
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
 
 try:
     from tabicl import TabICLRegressor
@@ -99,7 +257,7 @@ try:
     HAS_TABICL = True
 except Exception as _tabicl_import_error:  # pragma: no cover - environment dependent
     HAS_TABICL = False
-    print("warning: tabicl unavailable —", _tabicl_import_error)
+    print("aviso: tabicl indisponível —", _tabicl_import_error)
 
 
 # -----------------------------------------------------------------------------
@@ -116,7 +274,7 @@ W_NEG, W_POS = 0.2, 0.8
 # QRF quantile levels used to build the (lower, median, upper) scaffold.
 Q_LO, Q_MED, Q_HI = 0.05, 0.50, 0.95
 
-# Lambda grid used by every method (multiplier applied to the asymmetric scales).
+# Lambda grid used by CRC and ReCIRC (multiplier applied to the asymmetric scales).
 N_LAM = 80
 LAM_MAX = 4.0
 EPS_SCALE = 1e-3
@@ -124,6 +282,11 @@ EPS_SCALE = 1e-3
 # Number of lambda anchors on which ReCIRC actually fits a risk regressor;
 # the remaining grid points come from monotone PCHIP interpolation.
 N_LAM_TRAIN = 16
+
+# Pre-calibration budget grid, fixed for every split (loss bound B = 1).
+# Calibration losses select a budget from this grid; they never define it.
+A_GRID = np.linspace(0.0, 1.0, 201)
+A_GRID.setflags(write=False)
 
 # Split fractions: D = risk/context, C = calibration, T = test (the remainder).
 FRAC_D, FRAC_C = 0.40, 0.30
@@ -155,14 +318,14 @@ except Exception:
 # Detect Google Drive mounted (Colab) and use as default
 if os.path.isdir("/content/drive"):
     OUT_DIR = (
-        "/content/drive/MyDrive/PythonReCIRC/results/experiment_mechanism_superconductor_tabicl_aacrc_dcupc"
+        "/content/drive/MyDrive/PythonReCIRC/results/experiment_mechanism_superconductor_official_aacrc_fixed_budget_grid"
     )
 else:
-    OUT_DIR = "mechanism_superconductor_crc_aacrc_dcupc_recirc_tabicl_results"
+    OUT_DIR = "mechanism_superconductor_official_aacrc_recirc_results_fixed_budget_grid"
 
 # Method labels (kept stable across CSV outputs and figures).
 METHOD_CRC = "CRC"
-METHOD_AACRC = "AA-CRC-lin (D∪C)"
+METHOD_AACRC = "AA-CRC (official objective)"
 METHOD_RECIRC = "ReCIRC"
 METHODS_ORDER = [METHOD_CRC, METHOD_AACRC, METHOD_RECIRC]
 
@@ -188,42 +351,37 @@ def load_superconductor(cache_file: str = "./data_superconductor/train.csv") -> 
     extracted into a temporary directory; only ``train.csv`` is kept and cached
     locally so that repeated runs do not hit the network.
     """
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    Path(cache_file).parent.mkdir(parents=True, exist_ok=True)
 
     if not os.path.exists(cache_file):
-        wd = tempfile.mkdtemp(prefix="super_")
-        zp = os.path.join(wd, "s.zip")
-        ok = False
-        for url in (SUPER_URL, SUPER_FALLBACK):
-            try:
-                print("baixando", url, "...")
-                urllib.request.urlretrieve(url, zp)
-                ok = True
-                break
-            except Exception as e:
-                print("  failed:", str(e)[:70])
-        if not ok:
-            raise RuntimeError("could not download the Superconductor dataset")
-
-        with zipfile.ZipFile(zp) as zf:
-            zf.extractall(wd)
-
-        train_path = None
-        for r, _, fs in os.walk(wd):
-            for f in fs:
-                if f == "train.csv":
-                    train_path = os.path.join(r, f)
-        if train_path is None:
-            raise RuntimeError("train.csv not found in the downloaded archive")
-
-        pd.read_csv(train_path).to_csv(cache_file, index=False)
+        with tempfile.TemporaryDirectory(prefix="super_") as wd:
+            zp = os.path.join(wd, "s.zip")
+            for url in (SUPER_URL, SUPER_FALLBACK):
+                try:
+                    print("baixando", url, "...")
+                    urllib.request.urlretrieve(url, zp)
+                    break
+                except Exception as exc:
+                    print("  falhou:", str(exc)[:100])
+            else:
+                raise RuntimeError("Não consegui baixar Superconductor; passe --data-file com um CSV local.")
+            with zipfile.ZipFile(zp) as zf:
+                members = [name for name in zf.namelist() if Path(name).name == "train.csv"]
+                if len(members) != 1:
+                    raise RuntimeError("Esperado exatamente um train.csv no arquivo baixado.")
+                with zf.open(members[0]) as source:
+                    Path(cache_file).write_bytes(source.read())
 
     df = pd.read_csv(cache_file)
+    if "critical_temp" not in df or df.shape[1] < 3 or len(df) == 0:
+        raise ValueError("CSV precisa de critical_temp, ao menos duas covariáveis e observações.")
     y = df["critical_temp"].to_numpy(np.float32)
     X = df.drop(columns=["critical_temp"]).to_numpy(np.float32)
+    if not np.isfinite(X).all() or not np.isfinite(y).all():
+        raise ValueError("As covariáveis e critical_temp devem ser finitas.")
     names = list(df.drop(columns=["critical_temp"]).columns)
     print(
-        f"Superconductor: {X.shape[0]} × {X.shape[1]} | median temp_crit={np.median(y):.1f} max={y.max():.1f}"
+        f"Superconductor: {X.shape[0]} × {X.shape[1]} | temp_crit med={np.median(y):.1f} máx={y.max():.1f}"
     )
     return X, y, names
 
@@ -242,8 +400,8 @@ def build_slice_function(
     """Build the evaluation slices from the two features most correlated with the target.
 
     Each of the two features is binned into ``n_bins`` quantile bins; the slices
-    are the resulting bin interactions. These slices are label-free and are never
-    exposed to any of the methods.
+    are the resulting bin interactions. Feature selection uses full-data labels;
+    these exploratory slices are never exposed to any of the methods.
     """
     corr = np.array([abs(np.corrcoef(X[:, k], y)[0, 1]) for k in range(X.shape[1])])
     top2 = np.argsort(corr)[-2:]
@@ -273,6 +431,11 @@ def fit_qrf(
     The lower and upper quantiles are clipped against the median so that the
     resulting asymmetric scales are non-negative by construction.
     """
+    try:
+        from quantile_forest import RandomForestQuantileRegressor
+    except ImportError as exc:
+        raise RuntimeError("Instale quantile-forest no ambiente para executar o experimento.") from exc
+
     qrf = RandomForestQuantileRegressor(
         n_estimators=N_TREES_QRF,
         max_depth=MAX_DEPTH_QRF,
@@ -339,52 +502,7 @@ def crc_global(loss_cal: np.ndarray, alpha: float = ALPHA, B: float = 1.0) -> in
 
 
 # -----------------------------------------------------------------------------
-# AA-CRC-linear fitted on D u C
-# -----------------------------------------------------------------------------
-
-
-def aacrc_linear_fit(
-    L_fit: np.ndarray,
-    Phi_fit: np.ndarray,
-    lam_grid: np.ndarray,
-    alpha: float = ALPHA,
-    B: float = 1.0,
-) -> Tuple[LinearRegression, float]:
-    """Fit lambda(x) = Phi(x)^T beta by least squares and calibrate a global shift.
-
-    The regression target is the smallest lambda that zeroes the loss of each
-    point on the fitting split. The shift delta is the smallest value on a
-    symmetric grid for which the CRC bound falls below alpha, which yields the
-    narrowest admissible intervals. In this variant both the fit and the shift
-    calibration use D u C.
-    """
-    lam_opt = lam_grid[np.argmin(L_fit, axis=1)]
-    reg = LinearRegression().fit(Phi_fit, lam_opt)  # LINEAR class in the features
-    base = reg.predict(Phi_fit)
-    n = L_fit.shape[0]
-
-    def risk_at(delta: float) -> float:
-        lam_x = np.clip(base + delta, lam_grid[0], lam_grid[-1])
-        idx = np.searchsorted(lam_grid, lam_x).clip(0, len(lam_grid) - 1)
-        return float(L_fit[np.arange(n), idx].mean())
-
-    for d in np.linspace(-lam_grid[-1], lam_grid[-1], 400):
-        if float(crc_upper_bound(np.asarray(risk_at(d)), n=n, B=B)) <= alpha:
-            return reg, float(d)
-
-    return reg, float(lam_grid[-1])
-
-
-def aacrc_linear_predict(
-    reg: LinearRegression, delta: float, Phi: np.ndarray, lam_grid: np.ndarray
-) -> np.ndarray:
-    """Map the fitted linear rule plus shift to lambda-grid indices."""
-    lam_x = np.clip(reg.predict(Phi) + delta, lam_grid[0], lam_grid[-1])
-    return np.searchsorted(lam_grid, lam_x).clip(0, len(lam_grid) - 1)
-
-
-# -----------------------------------------------------------------------------
-# ReCIRC (Route 2: free multivariate risk regressor)
+# Original AA-CRC helpers are defined above.
 # -----------------------------------------------------------------------------
 
 
@@ -480,8 +598,7 @@ def run_recirc(
     R_T = predict_risk_table(models, F_T, lam_train, lam_grid)
 
     ar = np.arange(F_C.shape[0])
-    a_max = float(L_C[:, 0].mean())
-    a_grid = np.linspace(0, a_max, 201)
+    a_grid = A_GRID
     risks = np.array([L_C[ar, invert_risk(R_C, a)].mean() for a in a_grid])
 
     nC = F_C.shape[0]
@@ -538,6 +655,7 @@ def run_one_trial(
     slice_fn: Callable[[np.ndarray], Dict[str, np.ndarray]],
     alpha: float = ALPHA,
     backend: str = RISK_BACKEND,
+    use_recirc: bool = True,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Run the three arms on a single split and collect summary and slice rows."""
     n = len(X)
@@ -550,12 +668,6 @@ def run_one_trial(
     L_C, L_T, W_T = LOSS[idx_C], LOSS[idx_T], WIDTH[idx_T]
     ar = np.arange(len(idx_T))
 
-    # AA-CRC in this variant is fitted and calibrated on the union D u C.
-    idx_AA = np.concatenate([idx_D, idx_C])
-    L_AA = LOSS[idx_AA]
-    Phi_AA = np.column_stack([np.ones(len(idx_AA)), X[idx_AA]])
-    Phi_T = np.column_stack([np.ones(len(idx_T)), X[idx_T]])
-
     sl = slice_fn(idx_T)
 
     outs: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -566,16 +678,31 @@ def run_one_trial(
     outs[METHOD_CRC] = (L_T[:, j], W_T[:, j])
     selected[METHOD_CRC] = float(lam[j])
 
-    # --- Arm 2: AA-CRC-linear, fitted and calibrated on D u C ----------------
-    reg, delta = aacrc_linear_fit(L_AA, Phi_AA, lam, alpha)
-    idx_aa = aacrc_linear_predict(reg, delta, Phi_T, lam)
-    outs[METHOD_AACRC] = (L_T[ar, idx_aa], W_T[ar, idx_aa])
-    selected[METHOD_AACRC] = float(delta)
+    # --- Arm 2: authors' AA-CRC objective fitted on independent C ------------
+    diagnostic_path = (AACRC_OUTPUT_DIR / f"aacrc_diagnostics_trial_{trial:03d}.json"
+                       if AACRC_OUTPUT_DIR is not None else None)
+    fit = fit_original_aacrc(
+        X[idx_D], X[idx_C], Y[idx_C], q_med[idx_C], s_neg[idx_C], s_pos[idx_C],
+        alpha=alpha, ridge=AACRC_RIDGE, maxiter=AACRC_MAXITER,
+        module=AACRC_MODULE, diagnostic_path=diagnostic_path,
+    )
+    u_aa = predict_original_aacrc(fit, X[idx_T])
+    loss_aa, width_aa, lam_aa = evaluate_aacrc_intervals(
+        Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u_aa
+    )
+    outs[METHOD_AACRC] = (loss_aa, width_aa)
+    selected[METHOD_AACRC] = float(np.mean(lam_aa))
+    if AACRC_OUTPUT_DIR is not None:
+        pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
+                      "loss": loss_aa, "width": width_aa}).to_csv(
+            AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
+        )
 
     # --- Arm 3: ReCIRC, risk model on D, budget calibrated on C --------------
-    idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
-    outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
-    selected[METHOD_RECIRC] = float(a_hat)
+    if use_recirc:
+        idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
+        outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
+        selected[METHOD_RECIRC] = float(a_hat)
 
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
@@ -588,12 +715,13 @@ def run_one_trial(
                 "trial": trial,
                 "seed": seed,
                 "alpha": alpha,
-                "risk_backend": backend,
+                "risk_backend": backend if use_recirc else None,
                 "selected_param": selected[method],
                 "marginal_risk": float(loss.mean()),
                 "excess_risk_event": float(loss.mean() > alpha),
                 "avg_width": float(width.mean()),
                 "median_width": float(np.median(width)),
+                "infinite_width_rate": float(np.isinf(width).mean()),
                 "worst_slice": st["worst"],
                 "slice_cvar": st["cvar"],
                 "mean_excess_slice": st["excess"],
@@ -623,6 +751,16 @@ def run_one_trial(
 # -----------------------------------------------------------------------------
 
 
+def width_mean(values):
+    """Preserve infinite widths in aggregation across pandas versions."""
+    return float(np.asarray(values, dtype=float).mean())
+
+
+def width_sd(values):
+    values = np.asarray(values, dtype=float)
+    return float(values.std(ddof=1)) if len(values) > 1 and np.isfinite(values).all() else float("nan")
+
+
 def aggregate_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate the per-trial metrics by method."""
     if len(df) == 0:
@@ -634,8 +772,9 @@ def aggregate_summary(df: pd.DataFrame) -> pd.DataFrame:
             marginal_risk_mean=("marginal_risk", "mean"),
             marginal_risk_sd=("marginal_risk", "std"),
             excess_event_rate=("excess_risk_event", "mean"),
-            avg_width_mean=("avg_width", "mean"),
-            avg_width_sd=("avg_width", "std"),
+            avg_width_mean=("avg_width", width_mean),
+            avg_width_sd=("avg_width", width_sd),
+            infinite_width_rate=("infinite_width_rate", "mean"),
             worst_slice_mean=("worst_slice", "mean"),
             worst_slice_sd=("worst_slice", "std"),
             slice_cvar_mean=("slice_cvar", "mean"),
@@ -653,7 +792,7 @@ def aggregate_slices(df_slices: pd.DataFrame) -> pd.DataFrame:
     return df_slices.groupby(["method", "slice"], as_index=False).agg(
         slice_risk_mean=("slice_risk", "mean"),
         slice_risk_sd=("slice_risk", "std"),
-        mean_width=("mean_width", "mean"),
+        mean_width=("mean_width", width_mean),
         n_mean=("n", "mean"),
     )
 
@@ -673,7 +812,7 @@ def paired_comparison(df: pd.DataFrame, m1: str, m2: str, metric: str = "worst_s
         "metric": metric,
         "n_trials": int(len(d)),
         "mean_diff": float(d.mean()),
-        "sd_diff": float(d.std()),
+        "sd_diff": float(d.std(ddof=1)) if len(d) > 1 and np.isfinite(d).all() else float("nan"),
         "win_rate_first": float((d < 0).mean()),
     }
 
@@ -682,7 +821,7 @@ def build_paired_table(df: pd.DataFrame) -> pd.DataFrame:
     """Assemble the paired comparisons reported in the notebook, plus width."""
     rows = []
     for metric in ("worst_slice", "slice_cvar", "marginal_risk", "avg_width"):
-        for m1, m2 in ((METHOD_RECIRC, METHOD_AACRC), (METHOD_AACRC, METHOD_CRC)):
+        for m1, m2 in ((METHOD_RECIRC, METHOD_AACRC), (METHOD_RECIRC, METHOD_CRC), (METHOD_AACRC, METHOD_CRC)):
             r = paired_comparison(df, m1, m2, metric)
             if r:
                 rows.append(r)
@@ -697,7 +836,7 @@ def build_compact_table(summary: pd.DataFrame) -> pd.DataFrame:
 
     def fmt(mean_col: str, sd_col: str, digits: int) -> pd.Series:
         return out.apply(
-            lambda r: f"{r[mean_col]:.{digits}f} ± {0 if pd.isna(r[sd_col]) else r[sd_col]:.{digits}f}",
+            lambda r: f"{r[mean_col]:.{digits}f} ± {r[sd_col]:.{digits}f}",
             axis=1,
         )
 
@@ -710,6 +849,7 @@ def build_compact_table(summary: pd.DataFrame) -> pd.DataFrame:
             "n_trials",
             "marginal_risk",
             "avg_width",
+            "infinite_width_rate",
             "worst_slice_risk",
             "slice_cvar_mean",
             "mean_excess_slice",
@@ -741,7 +881,7 @@ def save_plots(
         [("worst_slice", "Worst-slice risk", True), ("avg_width", "Average width (K)", False)]
     ):
         means = [df[df.method == m][col].mean() for m in methods]
-        stds = [df[df.method == m][col].std() for m in methods]
+        stds = [df[df.method == m][col].std() if len(df[df.method == m]) > 1 else 0.0 for m in methods]
         x = np.arange(len(methods))
         axes[j].bar(x, means, yerr=stds, color=[PALETTE.get(m, "gray") for m in methods], capsize=4, alpha=0.85)
         if show_alpha:
@@ -826,27 +966,40 @@ def save_plots(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Superconductor mechanism experiment: CRC vs AA-CRC-linear (D∪C) vs ReCIRC."
+        description="Experimento de mecanismo Superconductor: CRC vs AA-CRC (objetivo oficial) vs ReCIRC."
     )
-    parser.add_argument("--output-dir", type=str, default=None, help="Directory in which to save results.")
-    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Number of experiment trials.")
-    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base seed for split randomization.")
-    parser.add_argument("--alpha", type=float, default=ALPHA, help="Target risk level.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Seed base para randomização dos splits.")
+    parser.add_argument("--alpha", type=float, default=ALPHA, help="Nível de risco alvo.")
     parser.add_argument(
-        "--slice-bins", type=int, default=N_SLICE_BINS, help="Bins per feature in the slice definition."
+        "--slice-bins", type=int, default=N_SLICE_BINS, help="Bins por feature na definição dos slices."
     )
     parser.add_argument(
         "--risk-model",
         type=str,
         default=RISK_BACKEND,
         choices=["tabicl", "histgb"],
-        help="Backbone for the ReCIRC risk regressor.",
+        help="Backbone do regressor de risco do ReCIRC.",
     )
-    parser.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
-    return parser.parse_args()
+    parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
+    parser.add_argument("--aacrc-integration", choices=["serial", "parallel"], default="serial")
+    parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE)
+    parser.add_argument("--aacrc-maxiter", type=int, default=AACRC_MAXITER)
+    parser.add_argument("--data-file", type=Path, default=Path(__file__).resolve().parent / "data_superconductor/train.csv")
+    parser.add_argument("--no-recirc", action="store_true", help="Executa apenas CRC e AA-CRC.")
+    parser.add_argument("--self-check", action="store_true", help="Validação offline com NumPy/SciPy.")
+    args = parser.parse_args()
+    if args.trials < 1 or not 0 < args.alpha < 1 or args.slice_bins < 1:
+        parser.error("--trials e --slice-bins devem ser positivos; --alpha deve estar entre 0 e 1.")
+    if not np.isfinite(args.aacrc_ridge) or args.aacrc_ridge < 0 or args.aacrc_maxiter < 1:
+        parser.error("--aacrc-ridge deve ser finito e não negativo; --aacrc-maxiter deve ser positivo.")
+    return args
 
 
 def main():
+    global AACRC_MODULE, AACRC_OUTPUT_DIR, AACRC_RIDGE, AACRC_MAXITER, AACRC_INTEGRATION
     args = parse_args()
 
     alpha = args.alpha
@@ -857,17 +1010,17 @@ def main():
     output_dir = Path(args.output_dir) if args.output_dir else Path(OUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if backend == "tabicl" and not HAS_TABICL:
-        print("tabicl unavailable -> histgb")
-        backend = "histgb"
-    if backend == "tabicl" and TABICL_DEVICE == "cpu":
-        warnings.warn("TabICL on CPU (without GPU) — slow. Colab: Runtime → Change runtime type → GPU.")
-
-    print(
-        f"config OK | risk regressor: {backend} | device: {TABICL_DEVICE if backend == 'tabicl' else 'n/a'}"
-    )
-
-    X, Y, names = load_superconductor()
+    use_recirc = not args.no_recirc
+    if use_recirc and backend == "tabicl" and not HAS_TABICL:
+        raise RuntimeError("TabICL indisponível. Instale tabicl, selecione --risk-model histgb ou --no-recirc.")
+    AACRC_INTEGRATION = args.aacrc_integration
+    AACRC_MODULE = load_original_aacrc(args.aacrc_repo, AACRC_INTEGRATION)
+    AACRC_OUTPUT_DIR = output_dir
+    AACRC_RIDGE, AACRC_MAXITER = args.aacrc_ridge, args.aacrc_maxiter
+    print(f"config OK | regressor de risco: {backend if use_recirc else 'disabled'} | device: {TABICL_DEVICE}")
+    X, Y, names = load_superconductor(str(args.data_file))
+    if int(FRAC_C * len(Y)) <= 1.0 / alpha:
+        raise ValueError("Superconductor precisa de len(C) > 1/alpha para ajustar AA-CRC.")
     slice_fn, slice_features = build_slice_function(X, Y, names, n_bins=args.slice_bins)
 
     summary_rows: List[Dict] = []
@@ -877,7 +1030,7 @@ def main():
     for t in range(n_trials):
         seed = base_seed + t
         s_rows, sl_rows = run_one_trial(
-            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha, backend=backend
+            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha, backend=backend, use_recirc=use_recirc
         )
         summary_rows.extend(s_rows)
         slice_rows.extend(sl_rows)
@@ -904,25 +1057,42 @@ def main():
     compact.to_csv(output_dir / "compact_summary.csv", index=False)
     paired.to_csv(output_dir / "paired_comparisons.csv", index=False)
 
-    print(f"\n=== Superconductor — AA-CRC-linear (D∪C) — {n_trials} trials | {elapsed:.0f}s ===\n")
+    print(f"\n=== Superconductor — AA-CRC (objetivo oficial) — {n_trials} trials | {elapsed:.0f}s ===\n")
     print(summary.round(4).to_string(index=False))
     print("\nTabela compacta:")
     print(compact.to_string(index=False))
 
     if len(paired):
-        print("\nPaired comparisons (negative = first method is better):")
+        print("\nComparações pareadas (negativo = primeiro método melhor):")
         for _, r in paired.iterrows():
             print(
                 f"  [{r['metric']}] {r['comparison']}: {r['mean_diff']:+.4f}±{r['sd_diff']:.4f} | "
-                f"first is better in {r['win_rate_first'] * 100:.0f}% of trials"
+                f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
             )
 
-    if not args.no_plots:
+    if not args.no_plots and not np.isfinite(df["avg_width"]).all():
+        warnings.warn("Larguras infinitas preservadas nos CSVs; gráficos omitidos.")
+    elif not args.no_plots:
         save_plots(df, df_slices, str(output_dir), slice_features=slice_features, alpha=alpha)
-        print(f"\nPlots saved to: {output_dir}")
+        print(f"\nGráficos salvos em: {output_dir}")
 
     meta = {
-        "experiment": "mechanism_superconductor",
+        "experiment": "mechanism_superconductor_official_aacrc",
+        "aacrc": {
+            "source_commit": AACRC_COMMIT, "source_sha256": AACRC_SOURCE_SHA256,
+            "source_path": str(Path(AACRC_MODULE.__file__).resolve()),
+            "integration": AACRC_INTEGRATION, "ridge": AACRC_RIDGE, "maxiter": AACRC_MAXITER,
+            "fit_split": "C", "feature_standardization_split": "D",
+            "feature_map": "intercept + standardized original physical covariates",
+            "threshold_class": "u(x) = Phi(x) @ theta",
+            "multiplier": "max(0, -log(u)) for u > 0; infinity otherwise",
+            "loss_reduction": "five positive auxiliary labels, lower:upper multiplicity 1:4",
+            "continuous_multiplier": True, "postfit_scalar_calibration": False,
+            "theory_note": "task-specific adaptation of the authors' objective; no additional validity claim",
+        },
+        "data_file": str(args.data_file.resolve()),
+        "recirc_enabled": use_recirc,
+        "slice_selection": "top-2 absolute target correlations on full data; exploratory",
         "alpha": float(alpha),
         "n_trials": int(n_trials),
         "seed": int(base_seed),
@@ -930,14 +1100,21 @@ def main():
         "n_features": int(X.shape[1]),
         "slice_features": list(slice_features),
         "slice_bins": int(args.slice_bins),
-        "risk_backend": str(backend),
+        "risk_backend": str(backend) if use_recirc else None,
         "tabicl_device": str(TABICL_DEVICE),
         "tabicl_context_size": int(N_D_TABICL),
         "frac_D": float(FRAC_D),
         "frac_C": float(FRAC_C),
         "loss_weights": {"w_neg": float(W_NEG), "w_pos": float(W_POS)},
         "quantiles": [float(Q_LO), float(Q_MED), float(Q_HI)],
-        "lambda_grid": {"n": int(N_LAM), "max": float(LAM_MAX), "n_train_anchors": int(N_LAM_TRAIN)},
+        "lambda_grid": {"methods": ["CRC", "ReCIRC"], "n": int(N_LAM), "max": float(LAM_MAX), "n_train_anchors": int(N_LAM_TRAIN)},
+        "budget_grid": {
+            "construction": "fixed_before_calibration",
+            "n": int(A_GRID.size),
+            "min": float(A_GRID[0]),
+            "max": float(A_GRID[-1]),
+            "values": A_GRID.tolist(),
+        },
         "qrf": {
             "n_estimators": int(N_TREES_QRF),
             "max_depth": int(MAX_DEPTH_QRF),
@@ -949,7 +1126,7 @@ def main():
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nResults saved to: {output_dir}")
+    print(f"\nResultados salvos em: {output_dir}")
 
 
 if __name__ == "__main__":
