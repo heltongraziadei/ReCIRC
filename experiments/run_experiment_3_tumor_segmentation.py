@@ -12,7 +12,7 @@ evaluates uncertainty calibration rather than training PraNet itself.
 
 Procedure
 ---------
-Each of 15 seeded trials randomly divides the images into three disjoint parts:
+Each seeded trial randomly divides the images into three disjoint parts:
 700 context images, 700 calibration images, and the remaining 398 test images.
 Every probability map is summarized by 90 quantiles, giving label-free image
 features for the adaptive methods.
@@ -49,6 +49,7 @@ overridden from the command line, so no dataset needs to be committed to Git.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -113,7 +114,7 @@ METHOD_ORDER = ["Standard CRC", "AA-CRC", "Rectified CRC"]
 class ExperimentConfig:
     alpha: float = 0.10
     loss_bound: float = 1.0
-    n_trials: int = 15
+    n_trials: int = 20
     base_seed: int = 2026
     n_context: int = 700
     n_calibration: int = 700
@@ -131,7 +132,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Experiment 3: tumor segmentation with CRC, AA-CRC, and ReCIRC."
     )
-    parser.add_argument("--trials", type=int, default=15)
+    parser.add_argument("--trials", type=int, default=ExperimentConfig.n_trials)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--alpha", type=float, default=0.10)
     parser.add_argument("--n-context", type=int, default=700)
@@ -163,7 +164,9 @@ def _safe_archive_members(archive):
         if normalized.is_absolute() or ".." in normalized.parts:
             raise ValueError(f"Unsafe path in downloaded archive: {member.name}")
         if normalized.name == "polyps-pranet.npz" or (
-            "examples" in normalized.parts and normalized.suffix.lower() in {".jpg", ".jpeg"}
+            normalized.parent.name == "examples"
+            and normalized.parent.parent.name == "polyps"
+            and normalized.suffix.lower() in {".jpg", ".jpeg"}
         ):
             selected.append(member)
     return selected
@@ -844,8 +847,15 @@ def main():
     print("\nPaired differences")
     print(paired.round(4).to_string(index=False))
     if not args.no_plots:
+        example_directory = data_path.parent / "examples"
+        rgb_report = PROJECT_ROOT / "data/polyps/rgb_verification.json"
+        if rgb_report.is_file():
+            report = json.loads(rgb_report.read_text())
+            if (report.get("complete") and report.get("targets_sha256") ==
+                    hashlib.sha256(masks.tobytes()).hexdigest()):
+                example_directory = rgb_report.parent / "examples"
         make_figures(final_metrics, conditional, first_diagnostics, probabilities,
-                     data_path.parent / "examples", config, output_dir)
+                     example_directory, config, output_dir)
     print(f"\nTotal time: {time.time() - start:.1f}s")
     print(f"Results: {output_dir}")
 
