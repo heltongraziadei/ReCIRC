@@ -11,7 +11,7 @@
     ]
   },
   "arguments": {
-    "trials": 15,
+    "trials": 20,
     "seed": 2026,
     "alpha": 0.1,
     "n_context": 700,
@@ -38,5 +38,5 @@
     "tabicl": "2.1.1",
     "torch": "2.12.0"
   },
-  "elapsed_seconds": 477.4287075996399
+  "elapsed_seconds": 634.5662429332733
 }
