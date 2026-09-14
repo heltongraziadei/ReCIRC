@@ -85,6 +85,11 @@ def ensure_packages():
 
 ensure_packages()
 
+try:
+    from .risk_calibration import calibration_rows, bin_groups, save_risk_calibration as save_calibration
+except ImportError:
+    from risk_calibration import calibration_rows, bin_groups, save_risk_calibration as save_calibration
+
 import gdown
 import numpy as np
 import pandas as pd
@@ -152,6 +157,8 @@ def parse_args():
     parser.add_argument("--keep-download", action="store_true",
                         help="Keep the 1.3 GB compressed archive after extraction.")
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument("--diagnostic-only", action="store_true",
+                        help="Run only ReCIRC and save held-out risk-calibration diagnostics.")
     return parser.parse_args()
 
 
@@ -496,7 +503,24 @@ def run_recirc(context_p, context_y, context_x, calibration_p, calibration_y,
 
     test_risk = predict_risk_matrix(model, test_x, lambda_grid, config.loss_bound)
     lambdas = invert_risk_curve(test_risk, lambda_grid, a_hat)
-    return segmentation_mask(test_p, lambdas), lambdas
+    return segmentation_mask(test_p, lambdas), lambdas, test_risk, a_hat
+
+
+def risk_calibration_diagnostic(test_p, test_y, test_risk, test_bins,
+                                lambda_grid, a_grid, n_bins, a_hat):
+    """Average per-image test FNR at every budget, with fixed context-fit bins."""
+    # Evaluate masks only once per lambda; each budget then uses table lookups.
+    loss_table = losses_over_lambda_segmentation(test_p, test_y, lambda_grid)
+    losses = np.column_stack([
+        loss_table[np.arange(len(test_p)), np.searchsorted(
+            lambda_grid, invert_risk_curve(test_risk, lambda_grid, a))]
+        for a in a_grid])
+    return calibration_rows(a_grid, losses, bin_groups(test_bins, n_bins), a_hat), loss_table
+
+
+def save_risk_calibration(curves, output_dir, make_plot=True):
+    """Compatibility wrapper for existing experiment-3 callers."""
+    save_calibration(curves, output_dir, make_plot, ylabel="Average per-image FNR")
 
 
 def run_trial(probabilities, masks, features, config, seed, device):
@@ -524,7 +548,7 @@ def run_trial(probabilities, masks, features, config, seed, device):
         features.iloc[aa_index].reset_index(drop=True).loc[nonempty].reset_index(drop=True),
         test_p, test_x, config, np.random.default_rng(seed))
 
-    predictions["Rectified CRC"], lambdas["Rectified CRC"] = run_recirc(
+    predictions["Rectified CRC"], lambdas["Rectified CRC"], test_risk, a_hat = run_recirc(
         context_p, context_y, context_x, calibration_p, calibration_y, calibration_x,
         test_p, test_x, config, lambda_grid, a_grid, device, seed)
 
@@ -535,7 +559,13 @@ def run_trial(probabilities, masks, features, config, seed, device):
                          "size": float(predictions[method].reshape(len(test_p), -1).sum(axis=1).mean())})
         conditional.append(conditional_metrics(
             predictions[method], test_y, test_bins, method, config.alpha, lambdas[method]))
-    diagnostics = {"test_indices": test_index, "standard_lambda": standard_lambda,
+    curves, loss_table = risk_calibration_diagnostic(
+        test_p, test_y, test_risk, test_bins, lambda_grid, a_grid, config.n_bins, a_hat)
+    diagnostics = {"risk_calibration": curves.to_records(index=False, column_dtypes={"group": "U32"}),
+                   "test_risk": test_risk, "test_loss_table": loss_table,
+                   "test_bins": test_bins, "lambda_grid": lambda_grid,
+                   "a_grid": a_grid, "a_hat": a_hat,
+                   "test_indices": test_index, "standard_lambda": standard_lambda,
                    "standard_masks": predictions["Standard CRC"],
                    "rectified_masks": predictions["Rectified CRC"],
                    "aa_crc_masks": predictions["AA-CRC"],
@@ -767,7 +797,38 @@ def main():
     features = compute_probability_quantiles(probabilities, config.n_quantiles)
     print(f"Tumor data: {probabilities.shape} | device: {device}")
 
+    if args.diagnostic_only:
+        curves_runs = []
+        for trial in range(config.n_trials):
+            seed = config.base_seed + trial
+            d, c, t = make_three_way_split(len(probabilities), config.n_context,
+                                          config.n_calibration, seed)
+            lambda_grid, a_grid = np.linspace(0, 1, 51), np.linspace(0.001, 1, 100)
+            edges = fit_uncertainty_edges(probabilities[d], config.n_bins)
+            bins = apply_uncertainty_bins(probabilities[t], edges)
+            _, _, risk, a_hat = run_recirc(
+                probabilities[d], masks[d], features.iloc[d],
+                probabilities[c], masks[c], features.iloc[c],
+                probabilities[t], features.iloc[t], config, lambda_grid, a_grid, device, seed)
+            curves, losses = risk_calibration_diagnostic(
+                probabilities[t], masks[t], risk, bins, lambda_grid, a_grid, config.n_bins, a_hat)
+            curves["trial"], curves["seed"] = trial, seed
+            curves_runs.append(curves)
+            np.savez_compressed(output_dir / f"risk_calibration_trial_{trial}.npz",
+                                test_indices=t, test_risk=risk, test_loss_table=losses,
+                                test_bins=bins, bin_edges=edges, lambda_grid=lambda_grid,
+                                a_grid=a_grid, a_hat=a_hat, seed=seed)
+            save_risk_calibration(pd.concat(curves_runs, ignore_index=True),
+                                  output_dir, not args.no_plots)
+            print(f"Diagnostic trial {trial + 1}/{config.n_trials} saved", flush=True)
+        (output_dir / "risk_calibration_config.json").write_text(json.dumps({
+            "config": vars(config), "device": device, "data_path": str(data_path),
+            "mode": "diagnostic-only", "grouping": "context-fitted probability uncertainty bins",
+        }, indent=2))
+        return
+
     marginal_runs, conditional_runs, diagnostic_rows, first_diagnostics = [], [], [], None
+    calibration_runs = []
     start = time.time()
     for trial in range(config.n_trials):
         trial_start = time.time()
@@ -778,6 +839,11 @@ def main():
         conditional["trial"], conditional["seed"] = trial, seed
         marginal_runs.append(marginal)
         conditional_runs.append(conditional)
+        curves = pd.DataFrame.from_records(diagnostics["risk_calibration"])
+        curves["trial"], curves["seed"] = trial, seed
+        calibration_runs.append(curves)
+        save_risk_calibration(pd.concat(calibration_runs, ignore_index=True),
+                              output_dir, not args.no_plots)
         diagnostic_rows.append({
             "trial": trial,
             "seed": seed,
