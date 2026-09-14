@@ -995,6 +995,12 @@ def m_from_risk_budget(risk_table: np.ndarray, a_grid: np.ndarray):
     return out
 
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
 def run_recirc(F_risk: np.ndarray, ranks_risk: np.ndarray, F_cal: np.ndarray, ranks_cal: np.ndarray,
                F_test: np.ndarray, ranks_test: np.ndarray, trial: int, seed: int, alpha: float = ALPHA,
                risk_model: str = RISK_MODEL):
@@ -1022,6 +1028,7 @@ def run_recirc(F_risk: np.ndarray, ranks_risk: np.ndarray, F_cal: np.ndarray, ra
         "losses_test": losses_test,
         "sizes_test": m_test.astype(float),
         "calibration_path": path,
+        "test_risk_table": risk_test,
     }
 
 
@@ -1091,7 +1098,7 @@ def add_summary_row(method_result: Dict, trial: int, base_acc: float, test_acc: 
 # -----------------------------------------------------------------------------
 
 
-def run_one_trial(trial: int, seed: int, X: np.ndarray, y: np.ndarray, K: int, risk_model: str = RISK_MODEL, use_recirc: bool = True):
+def run_one_trial(trial: int, seed: int, X: np.ndarray, y: np.ndarray, K: int, risk_model: str = RISK_MODEL, use_recirc: bool = True, diagnostic=None):
     idx_base, idx_risk, idx_cal, idx_test = make_four_way_split(y, seed)
 
     clf, proba = fit_base_classifier(X, y, idx_base, seed=seed, K=K)
@@ -1123,6 +1130,11 @@ def run_one_trial(trial: int, seed: int, X: np.ndarray, y: np.ndarray, K: int, r
 
     if use_recirc:
         res_recirc = run_recirc(F_risk, ranks_risk, F_cal, ranks_cal, F_test, ranks_test, trial, seed=seed + 1000, risk_model=risk_model, alpha=ALPHA)
+        if diagnostic is not None:
+            losses_by_budget = losses_from_m_matrix(
+                ranks_test, m_from_risk_budget(res_recirc["test_risk_table"], A_GRID))
+            diagnostic.add_trial(A_GRID, losses_by_budget, bin_groups(bins, N_BINS),
+                                 trial=trial, seed=seed, a_hat=res_recirc["selected_param"])
         results.append(res_recirc)
         paths.append(res_recirc["calibration_path"])
 
@@ -1396,9 +1408,10 @@ def main():
     all_bin_rows = []
     all_calibration_paths = []
 
+    risk_diagnostic = RiskCalibration()
     for trial in tqdm(range(N_TRIALS), desc="Trials"):
         seed = BASE_SEED + 100 * trial
-        summary_rows, bin_rows, paths = run_one_trial(trial=trial, seed=seed, X=X, y=y, K=K, risk_model=RISK_MODEL, use_recirc=not args.no_recirc)
+        summary_rows, bin_rows, paths = run_one_trial(trial=trial, seed=seed, X=X, y=y, K=K, risk_model=RISK_MODEL, use_recirc=not args.no_recirc, diagnostic=risk_diagnostic)
         all_summary_rows.extend(summary_rows)
         all_bin_rows.extend(bin_rows)
         all_calibration_paths.extend(paths)
@@ -1413,6 +1426,7 @@ def main():
     else:
         calibration_paths_df = pd.DataFrame()
 
+    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
     results_df.to_csv(output_dir / "summary_results.csv", index=False)
     bin_results_df.to_csv(output_dir / "bin_results.csv", index=False)
     calibration_paths_df.to_csv(output_dir / "calibration_paths.csv", index=False)
