@@ -605,6 +605,12 @@ def invert_risk(R: np.ndarray, a: float) -> np.ndarray:
     return np.where(ok.any(1), np.argmax(ok, 1), R.shape[1] - 1)
 
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
 def run_recirc(
     F_D: np.ndarray,
     L_D: np.ndarray,
@@ -615,10 +621,12 @@ def run_recirc(
     alpha: float,
     seed: int,
     backend: str,
+    return_risk=False,
 ) -> Tuple[np.ndarray, float]:
     """Fit the ReCIRC risk surface on D and calibrate the risk budget on C.
 
     Returns the selected lambda index per test point and the calibrated budget.
+    With return_risk=True, also returns the already-computed test risk matrix.
     """
     idx = np.linspace(0, len(lam_grid) - 1, N_LAM_TRAIN, dtype=int)
     lam_train = lam_grid[idx]
@@ -636,6 +644,8 @@ def run_recirc(
     v = np.where(bound <= alpha)[0]
     a_hat = a_grid[v[-1]] if len(v) else a_grid[0]
 
+    if return_risk:
+        return invert_risk(R_T, a_hat), float(a_hat), R_T
     return invert_risk(R_T, a_hat), float(a_hat)
 
 
@@ -693,6 +703,7 @@ def run_one_trial(
     alpha: float = ALPHA,
     risk_model: str = RISK_MODEL,
     use_recirc: bool = True,
+    diagnostic=None,
 ) -> Tuple[List[Dict], List[Dict], List[Dict], float]:
     """Run the three arms on a single split and collect marginal/conditional rows.
 
@@ -762,9 +773,19 @@ def run_one_trial(
     # --- Arm 3: ReCIRC -------------------------------------------------------
     if use_recirc:
         method_recirc = METHOD_RECIRC_TABICL if risk_model == "tabicl" else METHOD_RECIRC_HGB
-        idx_rc, a_hat = run_recirc(
-            F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, risk_model
+        recirc_result = run_recirc(
+            F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, risk_model,
+            return_risk=diagnostic is not None
         )
+        idx_rc, a_hat = recirc_result[:2]
+        if diagnostic is not None:
+            # Keep the calibration diagnostic focused on the five mutually
+            # exclusive difficulty bins.  Demographic interaction slices are
+            # still retained in slice_results.csv, but mixing overlapping
+            # slices into this figure made it difficult to interpret.
+            groups = bin_groups(bins_T, N_BINS)
+            losses_by_budget = np.column_stack([L_T[ar, invert_risk(recirc_result[2], a)] for a in A_GRID])
+            diagnostic.add_trial(A_GRID, losses_by_budget, groups, trial=trial, seed=seed, a_hat=a_hat)
         outs[method_recirc] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
         selected[method_recirc] = float(a_hat)
         saturation[method_recirc] = float(np.mean(idx_rc == len(lam) - 1))
@@ -1093,11 +1114,12 @@ def main():
     rows_slice: List[Dict] = []
     gaps: List[float] = []
 
+    risk_diagnostic = RiskCalibration()
     t0 = time.time()
     for t in range(n_trials):
         seed = base_seed + t
         m_rows, c_rows, s_rows, gap = run_one_trial(
-            trial=t, seed=seed, data=data, alpha=alpha, risk_model=risk_model, use_recirc=use_recirc
+            trial=t, seed=seed, data=data, alpha=alpha, risk_model=risk_model, use_recirc=use_recirc, diagnostic=risk_diagnostic
         )
         rows_marg.extend(m_rows)
         rows_cond.extend(c_rows)
@@ -1110,6 +1132,7 @@ def main():
         if (t + 1) % 5 == 0 or (t + 1) == n_trials:
             print(f"trial {t + 1}/{n_trials} | {time.time() - t0:.0f}s acumulados")
 
+    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
     df_marginal = pd.DataFrame(rows_marg)
     df_conditional = pd.DataFrame(rows_cond)
     df_slices = pd.DataFrame(rows_slice)
