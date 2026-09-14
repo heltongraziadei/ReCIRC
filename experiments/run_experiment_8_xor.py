@@ -597,6 +597,12 @@ def invert_risk(R: np.ndarray, a: float) -> np.ndarray:
     return np.where(ok.any(1), np.argmax(ok, 1), R.shape[1] - 1)
 
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
 def run_recirc(
     F_D: np.ndarray,
     L_D: np.ndarray,
@@ -607,6 +613,7 @@ def run_recirc(
     alpha: float,
     seed: int,
     backend: str = RISK_BACKEND,
+    return_risk=False,
 ) -> Tuple[np.ndarray, float]:
     """Fit the ReCIRC risk surface on D and calibrate the risk budget on C.
 
@@ -615,6 +622,7 @@ def run_recirc(
     saturates early while attention cost is quadratic in the context length.
 
     Returns the selected lambda index per test point and the calibrated budget.
+    With return_risk=True, also returns the already-computed test risk matrix.
     """
     idx = np.linspace(0, len(lam_grid) - 1, N_LAM_TRAIN, dtype=int)
     lam_train = lam_grid[idx]
@@ -639,6 +647,8 @@ def run_recirc(
     v = np.where(bound <= alpha)[0]
     a_hat = a_grid[v[-1]] if len(v) else a_grid[0]
 
+    if return_risk:
+        return invert_risk(R_T, a_hat), float(a_hat), R_T
     return invert_risk(R_T, a_hat), float(a_hat)
 
 
@@ -688,6 +698,8 @@ def run_one_trial(
     slice_fn: Callable[[np.ndarray], Dict[str, np.ndarray]],
     alpha: float = ALPHA,
     backend: str = RISK_BACKEND,
+    diagnostic=None,
+    save_predictions: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Run the three arms on a single split and collect summary and slice rows."""
     n = len(X)
@@ -735,16 +747,22 @@ def run_one_trial(
     diagnostic_path.write_text(json.dumps(fit["diagnostics"], indent=2, allow_nan=False))
     outs[METHOD_AACRC] = (loss_aa, width_aa)
     selected[METHOD_AACRC] = float(np.mean(lam_aa))
-    pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
-                  "loss": loss_aa, "width": width_aa,
-                  "was_truncated": raw_lam_aa > lam[-1],
-                  "raw_would_be_infinite": u_aa <= 0,
-                  "raw_loss": raw_loss_aa}).to_csv(
-        AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
-    )
+    if save_predictions:
+        pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
+                      "loss": loss_aa, "width": width_aa,
+                      "was_truncated": raw_lam_aa > lam[-1],
+                      "raw_would_be_infinite": u_aa <= 0,
+                      "raw_loss": raw_loss_aa}).to_csv(
+            AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
+        )
 
     # --- Arm 3: ReCIRC, risk model on D, budget calibrated on C --------------
-    idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
+    recirc_result = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend, return_risk=diagnostic is not None)
+    idx_rc, a_hat = recirc_result[:2]
+    if diagnostic is not None:
+        groups = sl
+        losses_by_budget = np.column_stack([L_T[ar, invert_risk(recirc_result[2], a)] for a in A_GRID])
+        diagnostic.add_trial(A_GRID, losses_by_budget, groups, trial=trial, seed=seed, a_hat=a_hat)
     outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
     selected[METHOD_RECIRC] = float(a_hat)
     saturation = {
@@ -1022,6 +1040,7 @@ def parse_args():
     parser.add_argument("--aacrc-maxiter", type=int, default=200)
     parser.add_argument("--self-check", action="store_true", help="Valida AA-CRC sem carregar QRF/TabICL.")
     parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--save-predictions", action="store_true", help="Salva CSVs AA-CRC por observação/trial.")
     return parser.parse_args()
 
 
@@ -1063,11 +1082,13 @@ def main():
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
 
+    risk_diagnostic = RiskCalibration()
     t0 = time.time()
     for t in range(n_trials):
         seed = base_seed + t
         s_rows, sl_rows = run_one_trial(
-            trial=t, seed=seed, X=X, Y=Y, slice_fn=xor_slice_fn, alpha=alpha, backend=backend
+            trial=t, seed=seed, X=X, Y=Y, slice_fn=xor_slice_fn, alpha=alpha,
+            backend=backend, diagnostic=risk_diagnostic, save_predictions=args.save_predictions,
         )
         summary_rows.extend(s_rows)
         slice_rows.extend(sl_rows)
@@ -1077,6 +1098,7 @@ def main():
         if (t + 1) % 5 == 0 or (t + 1) == n_trials:
             print(f"trial {t + 1}/{n_trials} | {time.time() - t0:.0f}s acumulados")
 
+    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
     df = pd.DataFrame(summary_rows)
     df_slices = pd.DataFrame(slice_rows)
     elapsed = time.time() - t0
@@ -1156,6 +1178,7 @@ def main():
             "min_samples_leaf": int(MIN_LEAF_QRF),
         },
         "slice_nmin": int(SLICE_NMIN),
+        "save_predictions": bool(args.save_predictions),
         "elapsed_seconds": float(elapsed),
     }
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
