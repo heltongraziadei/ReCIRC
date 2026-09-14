@@ -397,17 +397,16 @@ def quantile_bins(v: np.ndarray, n_bins: int = N_SLICE_BINS) -> np.ndarray:
 def build_slice_function(
     X: np.ndarray, y: np.ndarray, names: Sequence[str], n_bins: int = N_SLICE_BINS
 ) -> Tuple[Callable[[np.ndarray], Dict[str, np.ndarray]], List[str]]:
-    """Build the evaluation slices from the two features most correlated with the target.
+    """Build the original 4x4 slices from two target-correlated features.
 
-    Each of the two features is binned into ``n_bins`` quantile bins; the slices
-    are the resulting bin interactions. Feature selection uses full-data labels;
-    these exploratory slices are never exposed to any of the methods.
+    Each feature is divided into ``n_bins`` quantile bins and the slices are
+    their interactions. Because feature selection uses full-data labels, these
+    slices are exploratory rather than a strictly held-out guarantee.
     """
     corr = np.array([abs(np.corrcoef(X[:, k], y)[0, 1]) for k in range(X.shape[1])])
     top2 = np.argsort(corr)[-2:]
     slice_features = [names[k] for k in top2]
     print("features p/ slices:", slice_features)
-
     b1_all = quantile_bins(X[:, top2[0]], n_bins)
     b2_all = quantile_bins(X[:, top2[1]], n_bins)
 
@@ -564,6 +563,12 @@ def invert_risk(R: np.ndarray, a: float) -> np.ndarray:
     return np.where(ok.any(1), np.argmax(ok, 1), R.shape[1] - 1)
 
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
 def run_recirc(
     F_D: np.ndarray,
     L_D: np.ndarray,
@@ -574,6 +579,7 @@ def run_recirc(
     alpha: float,
     seed: int,
     backend: str = RISK_BACKEND,
+    return_risk=False,
 ) -> Tuple[np.ndarray, float]:
     """Fit the ReCIRC risk surface on D and calibrate the risk budget on C.
 
@@ -582,6 +588,7 @@ def run_recirc(
     saturates early while attention cost is quadratic in the context length.
 
     Returns the selected lambda index per test point and the calibrated budget.
+    With return_risk=True, also returns the already-computed test risk matrix.
     """
     idx = np.linspace(0, len(lam_grid) - 1, N_LAM_TRAIN, dtype=int)
     lam_train = lam_grid[idx]
@@ -606,6 +613,8 @@ def run_recirc(
     v = np.where(bound <= alpha)[0]
     a_hat = a_grid[v[-1]] if len(v) else a_grid[0]
 
+    if return_risk:
+        return invert_risk(R_T, a_hat), float(a_hat), R_T
     return invert_risk(R_T, a_hat), float(a_hat)
 
 
@@ -656,6 +665,8 @@ def run_one_trial(
     alpha: float = ALPHA,
     backend: str = RISK_BACKEND,
     use_recirc: bool = True,
+    diagnostic=None,
+    save_predictions: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Run the three arms on a single split and collect summary and slice rows."""
     n = len(X)
@@ -692,7 +703,7 @@ def run_one_trial(
     )
     outs[METHOD_AACRC] = (loss_aa, width_aa)
     selected[METHOD_AACRC] = float(np.mean(lam_aa))
-    if AACRC_OUTPUT_DIR is not None:
+    if save_predictions and AACRC_OUTPUT_DIR is not None:
         pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
                       "loss": loss_aa, "width": width_aa}).to_csv(
             AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
@@ -700,7 +711,12 @@ def run_one_trial(
 
     # --- Arm 3: ReCIRC, risk model on D, budget calibrated on C --------------
     if use_recirc:
-        idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
+        recirc_result = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend, return_risk=diagnostic is not None)
+        idx_rc, a_hat = recirc_result[:2]
+        if diagnostic is not None:
+            groups = sl
+            losses_by_budget = np.column_stack([L_T[ar, invert_risk(recirc_result[2], a)] for a in A_GRID])
+            diagnostic.add_trial(A_GRID, losses_by_budget, groups, trial=trial, seed=seed, a_hat=a_hat)
         outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
         selected[METHOD_RECIRC] = float(a_hat)
 
@@ -869,7 +885,7 @@ def save_plots(
     slice_features: Sequence[str],
     alpha: float = ALPHA,
 ) -> None:
-    """Save the method-level bar chart, the per-trial scatter and the slice heatmap."""
+    """Save method summaries and the original 4x4 slice heatmap."""
     os.makedirs(output_dir, exist_ok=True)
     methods = [m for m in METHODS_ORDER if m in df["method"].unique()]
     if not methods:
@@ -880,8 +896,9 @@ def save_plots(
     for j, (col, title, show_alpha) in enumerate(
         [("worst_slice", "Worst-slice risk", True), ("avg_width", "Average width (K)", False)]
     ):
-        means = [df[df.method == m][col].mean() for m in methods]
-        stds = [df[df.method == m][col].std() if len(df[df.method == m]) > 1 else 0.0 for m in methods]
+        finite = [df.loc[(df.method == m) & np.isfinite(df[col]), col] for m in methods]
+        means = [values.mean() if len(values) else np.nan for values in finite]
+        stds = [values.std() if len(values) > 1 else 0.0 for values in finite]
         x = np.arange(len(methods))
         axes[j].bar(x, means, yerr=stds, color=[PALETTE.get(m, "gray") for m in methods], capsize=4, alpha=0.85)
         if show_alpha:
@@ -913,7 +930,7 @@ def save_plots(
     jit = np.random.default_rng(0)
     for ax, (metric, ylab, title, show_alpha) in zip(axes, panels):
         for j, m in enumerate(methods):
-            tmp = df[df["method"] == m]
+            tmp = df[(df["method"] == m) & np.isfinite(df[metric])]
             x = np.full(len(tmp), j, float) + jit.normal(0, 0.04, len(tmp))
             ax.scatter(x, tmp[metric], alpha=0.75, s=45, color=PALETTE.get(m, "gray"))
             ax.hlines(tmp[metric].mean(), j - 0.2, j + 0.2, lw=2.5, color="black")
@@ -947,9 +964,9 @@ def save_plots(
         ax = axes[0, j]
         im = ax.imshow(grid, origin="lower", vmin=0, vmax=vmax, cmap="viridis")
         ax.set_title(m, fontsize=10)
-        ax.set_xlabel(f"Quantile bin: {slice_features[1] if len(slice_features) > 1 else 'feature 2'}", fontsize=8)
+        ax.set_xlabel(f"Quantile bin: {slice_features[1]}", fontsize=8)
         if j == 0:
-            ax.set_ylabel(f"Quantile bin: {slice_features[0] if slice_features else 'feature 1'}", fontsize=8)
+            ax.set_ylabel(f"Quantile bin: {slice_features[0]}", fontsize=8)
         ax.set_xticks(range(n_bins))
         ax.set_yticks(range(n_bins))
         fig.colorbar(im, ax=ax, fraction=0.046, label="Slice risk" if j == len(methods) - 1 else None)
@@ -983,6 +1000,7 @@ def parse_args():
         help="Backbone do regressor de risco do ReCIRC.",
     )
     parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--save-predictions", action="store_true", help="Salva CSVs AA-CRC por observação/trial.")
     parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
     parser.add_argument("--aacrc-integration", choices=["serial", "parallel"], default="serial")
     parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE)
@@ -1022,15 +1040,17 @@ def main():
     if int(FRAC_C * len(Y)) <= 1.0 / alpha:
         raise ValueError("Superconductor precisa de len(C) > 1/alpha para ajustar AA-CRC.")
     slice_fn, slice_features = build_slice_function(X, Y, names, n_bins=args.slice_bins)
-
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
 
+    risk_diagnostic = RiskCalibration(ylabel="Average loss (exploratory slices)")
     t0 = time.time()
     for t in range(n_trials):
         seed = base_seed + t
         s_rows, sl_rows = run_one_trial(
-            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha, backend=backend, use_recirc=use_recirc
+            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha,
+            backend=backend, use_recirc=use_recirc, diagnostic=risk_diagnostic,
+            save_predictions=args.save_predictions,
         )
         summary_rows.extend(s_rows)
         slice_rows.extend(sl_rows)
@@ -1040,6 +1060,7 @@ def main():
         if (t + 1) % 5 == 0 or (t + 1) == n_trials:
             print(f"trial {t + 1}/{n_trials} | {time.time() - t0:.0f}s acumulados")
 
+    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
     df = pd.DataFrame(summary_rows)
     df_slices = pd.DataFrame(slice_rows)
     elapsed = time.time() - t0
@@ -1070,9 +1091,7 @@ def main():
                 f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
             )
 
-    if not args.no_plots and not np.isfinite(df["avg_width"]).all():
-        warnings.warn("Larguras infinitas preservadas nos CSVs; gráficos omitidos.")
-    elif not args.no_plots:
+    if not args.no_plots:
         save_plots(df, df_slices, str(output_dir), slice_features=slice_features, alpha=alpha)
         print(f"\nGráficos salvos em: {output_dir}")
 
@@ -1100,6 +1119,7 @@ def main():
         "n_features": int(X.shape[1]),
         "slice_features": list(slice_features),
         "slice_bins": int(args.slice_bins),
+        "save_predictions": bool(args.save_predictions),
         "risk_backend": str(backend) if use_recirc else None,
         "tabicl_device": str(TABICL_DEVICE),
         "tabicl_context_size": int(N_D_TABICL),
