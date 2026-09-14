@@ -114,7 +114,7 @@ N_BINS = 10
 DIFFICULTY_KIND = "entropy"
 
 LAMBDA_GRID = np.linspace(0.0, 1.0, 26)
-A_GRID = np.linspace(0.0, 0.5, 101)
+A_GRID = np.linspace(0.0, 1, 101)
 
 LAMBDA_GRID_CRC = np.unique(np.concatenate([
     np.linspace(0.0, 0.25, 251),
@@ -436,7 +436,11 @@ def build_augmented(scores, gt, lambda_grid, include_full_scores=True):
 def fit_risk_model(X_aug, Z, device="cpu", seed=0):
     """Ajusta o modelo de risco (TabICL ou HistGradientBoosting)."""
     if HAS_TABICL:
-        m = TabICLRegressor(n_estimators=4, device=device, random_state=seed)
+        kwargs = {"n_estimators": 4, "device": device, "random_state": seed}
+        batch_size = os.environ.get("RECIRC_TABICL_BATCH_SIZE")
+        if batch_size is not None:
+            kwargs["batch_size"] = int(batch_size)
+        m = TabICLRegressor(**kwargs)
     else:
         m = HistGradientBoostingRegressor(max_iter=300, random_state=seed)
     m.fit(X_aug, Z)
@@ -463,6 +467,12 @@ def invert_risk_curve(R, lambda_grid, a):
     n_valid = (R <= a).sum(axis=1)
     lambdas = lambda_grid[np.maximum(n_valid - 1, 0)]
     return np.where(R[:, 0] > a, lambda_grid[0], lambdas)
+
+
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
 
 
 def run_recirc(
@@ -511,6 +521,7 @@ def run_recirc(
         "lambdas": lam_test,
         "a_hat": a_hat,
         "risks_cal": risks_cal,
+        "test_risk": R_test,
         "time": time.time() - t0,
     }
 
@@ -634,7 +645,7 @@ def conditional_by_bin(pred, gt, bins, n_bins, name):
     )
 
 
-def run_one_split_trial(scores, gt, seed):
+def run_one_split_trial(scores, gt, seed, diagnostic=None):
     """Executa um trial do experimento de múltiplos splits."""
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(scores))
@@ -669,6 +680,11 @@ def run_one_split_trial(scores, gt, seed):
         Ds, Dl, cs, cl, ts, LAMBDA_GRID, A_GRID, ALPHA, INCLUDE_FULL_SCORES,
         n_d_tabicl=N_D_TABICL, device=DEVICE, seed=seed
     )
+    if diagnostic is not None:
+        losses_by_budget = np.column_stack([
+            per_image_fnr(prediction_sets(ts, invert_risk_curve(o["test_risk"], LAMBDA_GRID, a)), tl)
+            for a in A_GRID])
+        diagnostic.add_trial(A_GRID, losses_by_budget, bin_groups(tb, N_BINS), seed=seed, a_hat=o["a_hat"])
     preds[rk] = o["pred"]
     lam_img[rk] = o["lambdas"]
 
@@ -710,12 +726,12 @@ def run_one_split_trial(scores, gt, seed):
     return marg, cond, adapt
 
 
-def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS):
+def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, diagnostic=None):
     """Executa múltiplos trials e agrega resultados."""
     marg_list, cond_list, adapt_list = [], [], []
 
     for t in tqdm(range(n_trials), desc="Trials"):
-        m, c, a = run_one_split_trial(sgmd, labels, BASE_SEED + t)
+        m, c, a = run_one_split_trial(sgmd, labels, BASE_SEED + t, diagnostic=diagnostic)
         for d in (m, c, a):
             if len(d) > 0:
                 d["trial"] = t
@@ -909,7 +925,8 @@ def main(args=None):
 
     # Múltiplos trials
     print("Executando múltiplos trials...")
-    df_marginal, df_conditional, df_adapt = run_multiple_trials(sgmd, labels, n_trials=N_TRIALS)
+    risk_diagnostic = RiskCalibration()
+    df_marginal, df_conditional, df_adapt = run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, diagnostic=risk_diagnostic)
     print()
 
     # Agregação
@@ -926,6 +943,7 @@ def main(args=None):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         results_dir = os.path.join(base_dir, "results", f"experiment_4_rcv1_text_{timestamp}")
     Path(results_dir).mkdir(parents=True, exist_ok=True)
+    risk_diagnostic.save(results_dir)
     print(f"\nSalvando resultados em: {results_dir}")
 
     # Salvar DataFrames
