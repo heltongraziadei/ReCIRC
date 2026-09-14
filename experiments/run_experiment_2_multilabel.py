@@ -384,7 +384,13 @@ def evaluate(data, lam, alpha, method, n_bins, lambda_grid):
     return row, bin_risk, bin_size
 
 
-def run_trial(args, seed, device, label_probs):
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
+def run_trial(args, seed, device, label_probs, diagnostic=None):
     rng = np.random.default_rng(seed)
     lambda_grid = np.linspace(0.0, 1.0, args.lambda_points)
     a_grid = np.linspace(0.0, 1.0, args.a_points)
@@ -427,6 +433,14 @@ def run_trial(args, seed, device, label_probs):
         rows.append(row)
         for group, (risk, size) in enumerate(zip(bin_risk, bin_size), start=1):
             bin_rows.append({"method": method, "bin": group, "risk": risk, "set_size": size})
+    if diagnostic is not None:
+        bins = np.asarray(pd.qcut(test["difficulty"], q=args.bins, labels=False, duplicates="drop"))
+        losses_by_budget = np.column_stack([
+            missed_positive_loss(test["scores"], test["y"],
+                                 invert_risk_matrix(recirc_risk_test, lambda_grid, a)[:, None])
+            for a in a_grid])
+        groups = bin_groups(bins, args.bins)
+        diagnostic.add_trial(a_grid, losses_by_budget, groups, seed=seed, a_hat=a_recirc)
     diagnostics = {
         "lambda_crc": lambda_crc,
         "a_recirc": a_recirc,
@@ -539,6 +553,7 @@ def main():
     mapping_error = validate_aacrc_mapping(validation)
     print(f"AA-CRC loss mapping max error: {mapping_error:.3e}")
 
+    risk_diagnostic = RiskCalibration()
     all_metrics = []
     all_bins = []
     diagnostics = []
@@ -546,7 +561,7 @@ def main():
     for trial in range(args.trials):
         seed = args.seed + trial + 1
         trial_start = time.time()
-        metrics, bins, diag = run_trial(args, seed, device, label_probs)
+        metrics, bins, diag = run_trial(args, seed, device, label_probs, diagnostic=risk_diagnostic)
         metrics["trial"] = trial
         metrics["seed"] = seed
         bins["trial"] = trial
@@ -559,6 +574,7 @@ def main():
         print(f"\nTrial {trial + 1}/{args.trials} ({time.time() - trial_start:.1f}s)")
         print(compact.round(4).to_string(index=False))
 
+    risk_diagnostic.save(args.output_dir, make_plot=not args.no_plots)
     results = pd.concat(all_metrics, ignore_index=True)
     bin_results = pd.concat(all_bins, ignore_index=True)
     diagnostics_df = pd.DataFrame(diagnostics)
