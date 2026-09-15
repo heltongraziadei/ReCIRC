@@ -1,13 +1,13 @@
 comparison,metric,n_trials,mean_diff,sd_diff,win_rate_first
-"ReCIRC − AA-CRC (official objective, truncated)",worst_slice,20,-0.020905375408515912,0.007579163085995834,1.0
-ReCIRC − CRC,worst_slice,20,-0.022981341928243637,0.009404021714657346,1.0
-"AA-CRC (official objective, truncated) − CRC",worst_slice,20,-0.00207596651972772,0.00762624384901237,0.45
-"ReCIRC − AA-CRC (official objective, truncated)",slice_cvar,20,-0.020905375408515912,0.007579163085995834,1.0
-ReCIRC − CRC,slice_cvar,20,-0.022981341928243637,0.009404021714657346,1.0
-"AA-CRC (official objective, truncated) − CRC",slice_cvar,20,-0.00207596651972772,0.00762624384901237,0.45
-"ReCIRC − AA-CRC (official objective, truncated)",marginal_risk,20,0.005160419087608654,0.003994244195113445,0.1
-ReCIRC − CRC,marginal_risk,20,0.002754169330000877,0.005936737235427782,0.3
-"AA-CRC (official objective, truncated) − CRC",marginal_risk,20,-0.0024062497576077765,0.003960649267492965,0.7
-"ReCIRC − AA-CRC (official objective, truncated)",avg_width,20,0.10073567971939652,0.0729842649350819,0.1
-ReCIRC − CRC,avg_width,20,0.15412940979003906,0.1046339563434291,0.05
-"AA-CRC (official objective, truncated) − CRC",avg_width,20,0.05339373007064254,0.08323372576731627,0.35
+"ReCIRC − AA-CRC (official objective, truncated)",worst_slice,20,-0.02089627557610877,0.007529203177502262,1.0
+ReCIRC − CRC,worst_slice,20,-0.022948281094431876,0.009458465124242102,1.0
+"AA-CRC (official objective, truncated) − CRC",worst_slice,20,-0.0020520055183231092,0.007611889726158666,0.45
+"ReCIRC − AA-CRC (official objective, truncated)",slice_cvar,20,-0.02089627557610877,0.007529203177502262,1.0
+ReCIRC − CRC,slice_cvar,20,-0.022948281094431876,0.009458465124242102,1.0
+"AA-CRC (official objective, truncated) − CRC",slice_cvar,20,-0.0020520055183231092,0.007611889726158666,0.45
+"ReCIRC − AA-CRC (official objective, truncated)",marginal_risk,20,0.005145835160215694,0.003994501386843267,0.1
+ReCIRC − CRC,marginal_risk,20,0.0027437519282102587,0.005962131262673914,0.3
+"AA-CRC (official objective, truncated) − CRC",marginal_risk,20,-0.002402083232005435,0.003962711168415086,0.7
+"ReCIRC − AA-CRC (official objective, truncated)",avg_width,20,0.1008154410529754,0.07304389450542201,0.1
+ReCIRC − CRC,avg_width,20,0.15423862934112548,0.104723444732015,0.05
+"AA-CRC (official objective, truncated) − CRC",avg_width,20,0.05342318828815009,0.0832260234801721,0.35
