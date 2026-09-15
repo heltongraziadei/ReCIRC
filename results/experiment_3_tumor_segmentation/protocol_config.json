@@ -3,7 +3,7 @@
   "dataset": {
     "source": "Google Drive archive from the original tumor-segmentation notebook",
     "google_drive_id": "1h7S6N_Rx7gdfO3ZunzErZy6H7620EbZK",
-    "local_npz": "/home/bresende/.cache/recirc/experiment_3_tumor_segmentation/polyps-pranet.npz",
+    "local_npz": "/home/bresende/projects/pesquisa/CRC_rectification/data/polyps/polyps-pranet.npz",
     "shape": [
       1798,
       352,
@@ -19,12 +19,13 @@
     "bins": 5,
     "quantiles": 90,
     "k_aug": 20,
-    "device": "auto",
+    "device": "cuda",
     "data_dir": "/home/bresende/.cache/recirc/experiment_3_tumor_segmentation",
-    "data_file": null,
-    "output_dir": "/home/bresende/projects/pesquisa/CRC_rectification/results/experiment_3_tumor_segmentation",
+    "data_file": "data/polyps/polyps-pranet.npz",
+    "output_dir": "/home/bresende/projects/pesquisa/CRC_rectification/results/experiment_3_tumor_segmentation/rerun_20_trials",
     "keep_download": false,
     "no_plots": false,
+    "diagnostic_only": false,
     "device_resolved": "cuda"
   },
   "aa_crc_note": "Valid AA-CRC with 90 label-free probability-quantile features; not the authors' separately trained ResNet embedding configuration.",
@@ -38,5 +39,5 @@
     "tabicl": "2.1.1",
     "torch": "2.12.0"
   },
-  "elapsed_seconds": 634.5662429332733
+  "elapsed_seconds": 700.7229661941528
 }
