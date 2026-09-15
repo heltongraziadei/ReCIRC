@@ -100,22 +100,67 @@ def auxiliary_tail_labels(y, median, s_neg, s_pos):
     return labels, [row[:, None].copy() for row in scores]
 
 
-def multiplier_from_aacrc_threshold(u):
+def multiplier_from_aacrc_threshold(u, lam_grid=None, truncate=False, snap_to_grid=False):
+    """Map the AA-CRC score threshold u to the interval multiplier.
+
+    With truncate=False this is the raw mapping the fitted objective implies,
+    and u <= 0 yields an infinite multiplier. That branch is the authors'
+    fully protective endpoint, finite in a bounded universe but unbounded for
+    real-valued responses.
+
+    With truncate=True the multiplier is clipped to the CRC/ReCIRC grid range,
+    so u <= 0 deploys the most protective rule that the shared family actually
+    contains. snap_to_grid additionally rounds to the nearest grid point, which
+    also charges AA-CRC the discretization the other two arms pay.
+
+    Returns (lam, diagnostics).
+    """
     u = np.asarray(u, dtype=float)
     if not np.isfinite(u).all():
         raise ValueError("AA-CRC score thresholds must be finite.")
-    lam = np.full(u.shape, np.inf)
+    if lam_grid is None:
+        lam_grid = np.linspace(0.0, LAM_MAX, N_LAM)
+    lam_grid = np.asarray(lam_grid, dtype=float)
+    lam_lo, lam_hi = float(lam_grid[0]), float(lam_grid[-1])
+
+    lam_raw = np.full(u.shape, np.inf)
     positive = u > 0
-    lam[positive] = np.maximum(0.0, -np.log(u[positive]))
-    return lam
+    lam_raw[positive] = np.maximum(0.0, -np.log(u[positive]))
+
+    lam = lam_raw
+    if truncate:
+        lam = np.clip(lam_raw, lam_lo, lam_hi)
+        if snap_to_grid:
+            lam = lam_grid[np.abs(lam_grid[None, :] - lam[:, None]).argmin(axis=1)]
+
+    finite_raw = lam_raw[np.isfinite(lam_raw)]
+    diagnostics = {
+        "truncate": bool(truncate),
+        "snap_to_grid": bool(snap_to_grid),
+        "lam_max": lam_hi,
+        "rate_u_nonpositive": float((u <= 0).mean()),
+        "rate_would_exceed_lam_max": float((lam_raw > lam_hi).mean()),
+        "rate_at_lam_max": float((lam >= lam_hi - 1e-12).mean()),
+        "lam_raw_max_finite": float(finite_raw.max()) if finite_raw.size else float("nan"),
+        "lam_raw_median_finite": float(np.median(finite_raw)) if finite_raw.size else float("nan"),
+    }
+    return lam, diagnostics
 
 
-def evaluate_aacrc_intervals(y, median, s_neg, s_pos, u):
-    lam = multiplier_from_aacrc_threshold(u)
+def evaluate_aacrc_intervals(y, median, s_neg, s_pos, u, lam_grid=None,
+                             truncate=False, snap_to_grid=False):
+    """Interval loss and width implied by the AA-CRC thresholds.
+
+    Defaults reproduce the untruncated mapping, which is what the fit-time
+    encoding-equivalence check must verify. Deployment passes truncate=True.
+    """
+    lam, diagnostics = multiplier_from_aacrc_threshold(
+        u, lam_grid=lam_grid, truncate=truncate, snap_to_grid=snap_to_grid
+    )
     lo = np.asarray(median, float) - lam * np.asarray(s_neg, float)
     hi = np.asarray(median, float) + lam * np.asarray(s_pos, float)
-    loss = 0.2 * (np.asarray(y) < lo) + 0.8 * (np.asarray(y) > hi)
-    return loss, hi - lo, lam
+    loss = W_NEG * (np.asarray(y) < lo) + W_POS * (np.asarray(y) > hi)
+    return loss, hi - lo, lam, diagnostics
 
 
 def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
@@ -164,7 +209,9 @@ def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
             success = False
             diag["success"] = False
             diag["error"] = "Fitted thresholds reached the original objective's lower truncation."
-        loss, _, _ = evaluate_aacrc_intervals(y_C, median_C, s_neg_C, s_pos_C, u)
+        loss, _, _, _ = evaluate_aacrc_intervals(
+            y_C, median_C, s_neg_C, s_pos_C, u, truncate=False
+        )
         encoded_loss = module._I_prime_list(labels, scores, np.maximum(u, 0.0), alpha, n) + alpha - 1.0 / n
         diag.update({"theta": theta.tolist(), "center": center.tolist(), "scale": scale.tolist(),
                      "fit_risk": float(loss.mean()),
@@ -201,7 +248,9 @@ def check_original_aacrc(repo):
     max_loss_error = 0.0
     for threshold in (-0.2, 0, 0.01, 0.2, 0.8, 1, 1.5, 3):
         u = np.full(n, threshold)
-        direct, widths, _ = evaluate_aacrc_intervals(y, median, s_neg, s_pos, u)
+        direct, widths, _, _ = evaluate_aacrc_intervals(
+            y, median, s_neg, s_pos, u, truncate=False
+        )
         encoded = module._I_prime_list(labels, scores, np.maximum(0, u), alpha, n) + alpha - 1 / n
         err = float(np.max(np.abs(direct - encoded)))
         max_loss_error = max(max_loss_error, err)
@@ -219,7 +268,7 @@ def check_original_aacrc(repo):
     numeric = module.J(theta, labels, scores, phi, alpha, n, "ridge", ridge)
     quadrature_error = abs(float(numeric - exact))
     assert quadrature_error < 0.005, quadrature_error
-    direct, _, _ = evaluate_aacrc_intervals(y, median, s_neg, s_pos, u)
+    direct, _, _, _ = evaluate_aacrc_intervals(y, median, s_neg, s_pos, u, truncate=False)
     expected_gradient = np.mean(phi * (direct - target)[:, None], axis=0) + 2 * ridge * theta
     gradient = module.J_prime(theta, labels, scores, phi, alpha, n, "ridge", ridge)
     assert np.allclose(gradient, expected_gradient, atol=1e-12)
@@ -270,6 +319,18 @@ BASE_SEED = 42
 
 # Asymmetric loss weights.
 W_NEG, W_POS = 0.2, 0.8
+
+# True bound of the asymmetric loss: it never exceeds max(W_NEG, W_POS).
+# The CRC correction uses B / (n + 1); B = 1.0 is valid but conservative.
+B_LOSS = max(W_NEG, W_POS)
+
+# AA-CRC deployment: the authors' objective lives on the score coordinate u.
+# u <= 0 means "the most protective rule available" -- finite in their setting
+# (all pixels), unbounded here (the whole real line). Truncating the recovered
+# multiplier at LAM_MAX puts AA-CRC in the SAME family as CRC and ReCIRC.
+# This affects deployment only; the fit-time encoding check stays untruncated.
+AACRC_TRUNCATE = True
+AACRC_SNAP_TO_GRID = False
 
 # QRF quantile levels used to build the (lower, median, upper) scaffold.
 Q_LO, Q_MED, Q_HI = 0.05, 0.50, 0.95
@@ -397,16 +458,17 @@ def quantile_bins(v: np.ndarray, n_bins: int = N_SLICE_BINS) -> np.ndarray:
 def build_slice_function(
     X: np.ndarray, y: np.ndarray, names: Sequence[str], n_bins: int = N_SLICE_BINS
 ) -> Tuple[Callable[[np.ndarray], Dict[str, np.ndarray]], List[str]]:
-    """Build the original 4x4 slices from two target-correlated features.
+    """Build the evaluation slices from the two features most correlated with the target.
 
-    Each feature is divided into ``n_bins`` quantile bins and the slices are
-    their interactions. Because feature selection uses full-data labels, these
-    slices are exploratory rather than a strictly held-out guarantee.
+    Each of the two features is binned into ``n_bins`` quantile bins; the slices
+    are the resulting bin interactions. Feature selection uses full-data labels;
+    these exploratory slices are never exposed to any of the methods.
     """
     corr = np.array([abs(np.corrcoef(X[:, k], y)[0, 1]) for k in range(X.shape[1])])
     top2 = np.argsort(corr)[-2:]
     slice_features = [names[k] for k in top2]
     print("features p/ slices:", slice_features)
+
     b1_all = quantile_bins(X[:, top2[0]], n_bins)
     b2_all = quantile_bins(X[:, top2[1]], n_bins)
 
@@ -486,12 +548,12 @@ def feats(X: np.ndarray, q_med: np.ndarray, s_neg: np.ndarray, s_pos: np.ndarray
 # -----------------------------------------------------------------------------
 
 
-def crc_upper_bound(mean_loss: np.ndarray, n: int, B: float = 1.0) -> np.ndarray:
+def crc_upper_bound(mean_loss: np.ndarray, n: int, B: float = B_LOSS) -> np.ndarray:
     """Finite-sample CRC upper bound (n / (n + 1)) * Rhat + B / (n + 1)."""
     return (n / (n + 1.0)) * mean_loss + B / (n + 1.0)
 
 
-def crc_global(loss_cal: np.ndarray, alpha: float = ALPHA, B: float = 1.0) -> int:
+def crc_global(loss_cal: np.ndarray, alpha: float = ALPHA, B: float = B_LOSS) -> int:
     """Marginal CRC: smallest lambda index whose CRC bound is below alpha."""
     n = loss_cal.shape[0]
     rhat = loss_cal.mean(0)
@@ -563,12 +625,6 @@ def invert_risk(R: np.ndarray, a: float) -> np.ndarray:
     return np.where(ok.any(1), np.argmax(ok, 1), R.shape[1] - 1)
 
 
-try:
-    from .risk_calibration import RiskCalibration, bin_groups
-except ImportError:
-    from risk_calibration import RiskCalibration, bin_groups
-
-
 def run_recirc(
     F_D: np.ndarray,
     L_D: np.ndarray,
@@ -579,7 +635,6 @@ def run_recirc(
     alpha: float,
     seed: int,
     backend: str = RISK_BACKEND,
-    return_risk=False,
 ) -> Tuple[np.ndarray, float]:
     """Fit the ReCIRC risk surface on D and calibrate the risk budget on C.
 
@@ -588,7 +643,6 @@ def run_recirc(
     saturates early while attention cost is quadratic in the context length.
 
     Returns the selected lambda index per test point and the calibrated budget.
-    With return_risk=True, also returns the already-computed test risk matrix.
     """
     idx = np.linspace(0, len(lam_grid) - 1, N_LAM_TRAIN, dtype=int)
     lam_train = lam_grid[idx]
@@ -613,8 +667,6 @@ def run_recirc(
     v = np.where(bound <= alpha)[0]
     a_hat = a_grid[v[-1]] if len(v) else a_grid[0]
 
-    if return_risk:
-        return invert_risk(R_T, a_hat), float(a_hat), R_T
     return invert_risk(R_T, a_hat), float(a_hat)
 
 
@@ -665,8 +717,6 @@ def run_one_trial(
     alpha: float = ALPHA,
     backend: str = RISK_BACKEND,
     use_recirc: bool = True,
-    diagnostic=None,
-    save_predictions: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Run the three arms on a single split and collect summary and slice rows."""
     n = len(X)
@@ -684,10 +734,14 @@ def run_one_trial(
     outs: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     selected: Dict[str, float] = {}
 
+    saturation: Dict[str, float] = {}
+    top = len(lam) - 1
+
     # --- Arm 1: marginal CRC, calibrated on C only ---------------------------
     j = crc_global(L_C, alpha)
     outs[METHOD_CRC] = (L_T[:, j], W_T[:, j])
     selected[METHOD_CRC] = float(lam[j])
+    saturation[METHOD_CRC] = float(j == top)
 
     # --- Arm 2: authors' AA-CRC objective fitted on independent C ------------
     diagnostic_path = (AACRC_OUTPUT_DIR / f"aacrc_diagnostics_trial_{trial:03d}.json"
@@ -698,27 +752,30 @@ def run_one_trial(
         module=AACRC_MODULE, diagnostic_path=diagnostic_path,
     )
     u_aa = predict_original_aacrc(fit, X[idx_T])
-    loss_aa, width_aa, lam_aa = evaluate_aacrc_intervals(
-        Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u_aa
+    loss_aa, width_aa, lam_aa, diag_lam = evaluate_aacrc_intervals(
+        Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u_aa,
+        lam_grid=lam, truncate=AACRC_TRUNCATE, snap_to_grid=AACRC_SNAP_TO_GRID,
     )
     outs[METHOD_AACRC] = (loss_aa, width_aa)
     selected[METHOD_AACRC] = float(np.mean(lam_aa))
-    if save_predictions and AACRC_OUTPUT_DIR is not None:
+    saturation[METHOD_AACRC] = float(diag_lam["rate_at_lam_max"])
+    if AACRC_OUTPUT_DIR is not None:
         pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
                       "loss": loss_aa, "width": width_aa}).to_csv(
             AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
         )
+        path = AACRC_OUTPUT_DIR / f"aacrc_diagnostics_trial_{trial:03d}.json"
+        if path.exists():
+            payload = json.loads(path.read_text())
+            payload["deployment_multiplier"] = diag_lam
+            path.write_text(json.dumps(payload, indent=2, allow_nan=False))
 
     # --- Arm 3: ReCIRC, risk model on D, budget calibrated on C --------------
     if use_recirc:
-        recirc_result = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend, return_risk=diagnostic is not None)
-        idx_rc, a_hat = recirc_result[:2]
-        if diagnostic is not None:
-            groups = sl
-            losses_by_budget = np.column_stack([L_T[ar, invert_risk(recirc_result[2], a)] for a in A_GRID])
-            diagnostic.add_trial(A_GRID, losses_by_budget, groups, trial=trial, seed=seed, a_hat=a_hat)
+        idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
         outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
         selected[METHOD_RECIRC] = float(a_hat)
+        saturation[METHOD_RECIRC] = float((idx_rc == top).mean())
 
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
@@ -738,6 +795,7 @@ def run_one_trial(
                 "avg_width": float(width.mean()),
                 "median_width": float(np.median(width)),
                 "infinite_width_rate": float(np.isinf(width).mean()),
+                "rate_at_lam_max": float(saturation.get(method, float("nan"))),
                 "worst_slice": st["worst"],
                 "slice_cvar": st["cvar"],
                 "mean_excess_slice": st["excess"],
@@ -791,6 +849,7 @@ def aggregate_summary(df: pd.DataFrame) -> pd.DataFrame:
             avg_width_mean=("avg_width", width_mean),
             avg_width_sd=("avg_width", width_sd),
             infinite_width_rate=("infinite_width_rate", "mean"),
+            rate_at_lam_max=("rate_at_lam_max", "mean"),
             worst_slice_mean=("worst_slice", "mean"),
             worst_slice_sd=("worst_slice", "std"),
             slice_cvar_mean=("slice_cvar", "mean"),
@@ -885,7 +944,7 @@ def save_plots(
     slice_features: Sequence[str],
     alpha: float = ALPHA,
 ) -> None:
-    """Save method summaries and the original 4x4 slice heatmap."""
+    """Save the method-level bar chart, the per-trial scatter and the slice heatmap."""
     os.makedirs(output_dir, exist_ok=True)
     methods = [m for m in METHODS_ORDER if m in df["method"].unique()]
     if not methods:
@@ -896,9 +955,8 @@ def save_plots(
     for j, (col, title, show_alpha) in enumerate(
         [("worst_slice", "Worst-slice risk", True), ("avg_width", "Average width (K)", False)]
     ):
-        finite = [df.loc[(df.method == m) & np.isfinite(df[col]), col] for m in methods]
-        means = [values.mean() if len(values) else np.nan for values in finite]
-        stds = [values.std() if len(values) > 1 else 0.0 for values in finite]
+        means = [df[df.method == m][col].mean() for m in methods]
+        stds = [df[df.method == m][col].std() if len(df[df.method == m]) > 1 else 0.0 for m in methods]
         x = np.arange(len(methods))
         axes[j].bar(x, means, yerr=stds, color=[PALETTE.get(m, "gray") for m in methods], capsize=4, alpha=0.85)
         if show_alpha:
@@ -930,7 +988,7 @@ def save_plots(
     jit = np.random.default_rng(0)
     for ax, (metric, ylab, title, show_alpha) in zip(axes, panels):
         for j, m in enumerate(methods):
-            tmp = df[(df["method"] == m) & np.isfinite(df[metric])]
+            tmp = df[df["method"] == m]
             x = np.full(len(tmp), j, float) + jit.normal(0, 0.04, len(tmp))
             ax.scatter(x, tmp[metric], alpha=0.75, s=45, color=PALETTE.get(m, "gray"))
             ax.hlines(tmp[metric].mean(), j - 0.2, j + 0.2, lw=2.5, color="black")
@@ -964,9 +1022,9 @@ def save_plots(
         ax = axes[0, j]
         im = ax.imshow(grid, origin="lower", vmin=0, vmax=vmax, cmap="viridis")
         ax.set_title(m, fontsize=10)
-        ax.set_xlabel(f"Quantile bin: {slice_features[1]}", fontsize=8)
+        ax.set_xlabel(f"Quantile bin: {slice_features[1] if len(slice_features) > 1 else 'feature 2'}", fontsize=8)
         if j == 0:
-            ax.set_ylabel(f"Quantile bin: {slice_features[0]}", fontsize=8)
+            ax.set_ylabel(f"Quantile bin: {slice_features[0] if slice_features else 'feature 1'}", fontsize=8)
         ax.set_xticks(range(n_bins))
         ax.set_yticks(range(n_bins))
         fig.colorbar(im, ax=ax, fraction=0.046, label="Slice risk" if j == len(methods) - 1 else None)
@@ -1000,11 +1058,19 @@ def parse_args():
         help="Backbone do regressor de risco do ReCIRC.",
     )
     parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
-    parser.add_argument("--save-predictions", action="store_true", help="Salva CSVs AA-CRC por observação/trial.")
     parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
     parser.add_argument("--aacrc-integration", choices=["serial", "parallel"], default="serial")
     parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE)
     parser.add_argument("--aacrc-maxiter", type=int, default=AACRC_MAXITER)
+    parser.add_argument(
+        "--no-aacrc-truncate", action="store_true",
+        help="Nao trunca o multiplicador do AA-CRC em LAM_MAX (reproduz o comportamento antigo, "
+             "com intervalos infinitos quando u <= 0).",
+    )
+    parser.add_argument(
+        "--aacrc-snap-to-grid", action="store_true",
+        help="Arredonda o multiplicador do AA-CRC para a grade de N_LAM pontos usada por CRC/ReCIRC.",
+    )
     parser.add_argument("--data-file", type=Path, default=Path(__file__).resolve().parent / "data_superconductor/train.csv")
     parser.add_argument("--no-recirc", action="store_true", help="Executa apenas CRC e AA-CRC.")
     parser.add_argument("--self-check", action="store_true", help="Validação offline com NumPy/SciPy.")
@@ -1018,6 +1084,7 @@ def parse_args():
 
 def main():
     global AACRC_MODULE, AACRC_OUTPUT_DIR, AACRC_RIDGE, AACRC_MAXITER, AACRC_INTEGRATION
+    global AACRC_TRUNCATE, AACRC_SNAP_TO_GRID
     args = parse_args()
 
     alpha = args.alpha
@@ -1035,22 +1102,24 @@ def main():
     AACRC_MODULE = load_original_aacrc(args.aacrc_repo, AACRC_INTEGRATION)
     AACRC_OUTPUT_DIR = output_dir
     AACRC_RIDGE, AACRC_MAXITER = args.aacrc_ridge, args.aacrc_maxiter
+    AACRC_TRUNCATE = not args.no_aacrc_truncate
+    AACRC_SNAP_TO_GRID = bool(args.aacrc_snap_to_grid)
+    if not AACRC_TRUNCATE:
+        print('AVISO: multiplicador do AA-CRC nao truncado; larguras infinitas sao possiveis.')
     print(f"config OK | regressor de risco: {backend if use_recirc else 'disabled'} | device: {TABICL_DEVICE}")
     X, Y, names = load_superconductor(str(args.data_file))
     if int(FRAC_C * len(Y)) <= 1.0 / alpha:
         raise ValueError("Superconductor precisa de len(C) > 1/alpha para ajustar AA-CRC.")
     slice_fn, slice_features = build_slice_function(X, Y, names, n_bins=args.slice_bins)
+
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
 
-    risk_diagnostic = RiskCalibration(ylabel="Average loss (exploratory slices)")
     t0 = time.time()
     for t in range(n_trials):
         seed = base_seed + t
         s_rows, sl_rows = run_one_trial(
-            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha,
-            backend=backend, use_recirc=use_recirc, diagnostic=risk_diagnostic,
-            save_predictions=args.save_predictions,
+            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha, backend=backend, use_recirc=use_recirc
         )
         summary_rows.extend(s_rows)
         slice_rows.extend(sl_rows)
@@ -1060,7 +1129,6 @@ def main():
         if (t + 1) % 5 == 0 or (t + 1) == n_trials:
             print(f"trial {t + 1}/{n_trials} | {time.time() - t0:.0f}s acumulados")
 
-    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
     df = pd.DataFrame(summary_rows)
     df_slices = pd.DataFrame(slice_rows)
     elapsed = time.time() - t0
@@ -1091,7 +1159,9 @@ def main():
                 f"primeiro melhor em {r['win_rate_first'] * 100:.0f}% dos trials"
             )
 
-    if not args.no_plots:
+    if not args.no_plots and not np.isfinite(df["avg_width"]).all():
+        warnings.warn("Larguras infinitas preservadas nos CSVs; gráficos omitidos.")
+    elif not args.no_plots:
         save_plots(df, df_slices, str(output_dir), slice_features=slice_features, alpha=alpha)
         print(f"\nGráficos salvos em: {output_dir}")
 
@@ -1119,7 +1189,6 @@ def main():
         "n_features": int(X.shape[1]),
         "slice_features": list(slice_features),
         "slice_bins": int(args.slice_bins),
-        "save_predictions": bool(args.save_predictions),
         "risk_backend": str(backend) if use_recirc else None,
         "tabicl_device": str(TABICL_DEVICE),
         "tabicl_context_size": int(N_D_TABICL),
@@ -1128,6 +1197,9 @@ def main():
         "loss_weights": {"w_neg": float(W_NEG), "w_pos": float(W_POS)},
         "quantiles": [float(Q_LO), float(Q_MED), float(Q_HI)],
         "lambda_grid": {"methods": ["CRC", "ReCIRC"], "n": int(N_LAM), "max": float(LAM_MAX), "n_train_anchors": int(N_LAM_TRAIN)},
+        "loss_bound_B": float(B_LOSS),
+        "aacrc_deployment": {"truncate_at_lam_max": bool(AACRC_TRUNCATE),
+                             "snap_to_grid": bool(AACRC_SNAP_TO_GRID)},
         "budget_grid": {
             "construction": "fixed_before_calibration",
             "n": int(A_GRID.size),
