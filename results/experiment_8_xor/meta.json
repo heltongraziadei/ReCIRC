@@ -1,22 +1,37 @@
 {
-  "experiment": "mechanism_xor_official_aacrc2_truncated",
+  "experiment": "mechanism_xor_official_aacrc_rf_leaves",
   "aacrc": {
     "source_commit": "64504c011ac2db910e258037e48170a63381b5e6",
     "source_sha256": "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315",
-    "source_path": "/tmp/recirc-aacrc-validation/multiaccurate_cp/utils/multiaccurate.py",
+    "source_path": "/content/drive/MyDrive/PythonReCIRC/AA-CRC/multiaccurate_cp/utils/multiaccurate.py",
     "integration": "serial",
     "ridge": 0.01,
     "maxiter": 200,
     "fit_split": "C",
-    "feature_standardization_split": "D",
-    "feature_map": "intercept + standardized raw covariates; no XOR interaction",
+    "basis": "both",
+    "covariates": "x",
     "threshold_class": "u(x) = Phi(x) @ theta",
     "fit_multiplier": "max(0, -log(u)) for u > 0; infinity otherwise",
-    "multiplier": "min(LAM_MAX, max(0, -log(u))) for u > 0; LAM_MAX otherwise",
-    "deployment": {
-      "truncate": true,
-      "lam_max": 4.0,
-      "snap_to_grid": false
+    "linear_arm": {
+      "feature_map": "intercept + standardized covariates (D statistics); no XOR interaction",
+      "ridge": 0.01,
+      "ridge_on_intercept": false,
+      "multiplier": "min(LAM_MAX, max(0, -log(u))) for u > 0; LAM_MAX otherwise",
+      "deployment": {
+        "truncate": true,
+        "lam_max": 4.0,
+        "snap_to_grid": false
+      }
+    },
+    "rf_arm": {
+      "feature_map": "one-hot RF leaf indicators (Blot et al., Algorithm 1)",
+      "rf_fit_split": "D",
+      "rf_target": "log1p(minimal covering multiplier), OOB QRF quantiles",
+      "n_trees": 3,
+      "max_depth": 4,
+      "min_samples_leaf": 100,
+      "ridge": 0.0,
+      "bounds": "theta_j in [exp(-LAM_MAX)/T, 1/T] (no truncation needed)"
     },
     "loss_reduction": "five positive auxiliary labels, lower:upper multiplicity 1:4",
     "continuous_multiplier": true,
@@ -30,6 +45,8 @@
   "n_samples": 16000,
   "n_features": 8,
   "risk_backend": "tabicl",
+  "recirc_enabled": true,
+  "recirc_oob_context": false,
   "tabicl_device": "cuda",
   "tabicl_context_size": 4000,
   "frac_D": 0.4,
@@ -263,5 +280,6 @@
     "min_samples_leaf": 40
   },
   "slice_nmin": 50,
-  "elapsed_seconds": 331.2962713241577
+  "save_predictions": false,
+  "elapsed_seconds": 820.1654706001282
 }

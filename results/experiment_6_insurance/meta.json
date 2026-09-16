@@ -1,9 +1,9 @@
 {
-  "experiment": "experiment_6_insurance_official_aacrc2_truncated",
+  "experiment": "experiment_6_insurance_official_aacrc_rf_leaves",
   "aacrc": {
     "source_commit": "64504c011ac2db910e258037e48170a63381b5e6",
     "source_sha256": "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315",
-    "repository": "/tmp/recirc-aacrc-validation",
+    "repository": "/content/drive/MyDrive/PythonReCIRC/AA-CRC",
     "objective": "authors J/J_prime",
     "integration": "serial",
     "quadrature_nodes": 100,
@@ -11,26 +11,43 @@
     "ridge": 0.01,
     "maxiter": 200,
     "fit_split": "C",
-    "feature_standardization_split": "D",
+    "basis": "both",
+    "covariates": "x",
     "sample_correction": "1/len(C)",
     "auxiliary_labels_per_observation": 5,
-    "threshold_class": "affine u on standardized original one-hot covariates",
+    "threshold_class": "u(x) = Phi(x) @ theta",
     "fit_interval_multiplier": "max(0, -log(u)) if u > 0 else infinity",
-    "interval_multiplier": "min(LAM_MAX, max(0, -log(u))) if u > 0 else LAM_MAX",
-    "deployment": {
-      "truncate": true,
-      "lam_max": 4.0,
-      "snap_to_grid": false
+    "linear_arm": {
+      "feature_map": "intercept + covariates standardized with D statistics",
+      "ridge": 0.01,
+      "ridge_on_intercept": false,
+      "interval_multiplier": "min(LAM_MAX, max(0, -log(u))) if u > 0 else LAM_MAX",
+      "deployment": {
+        "truncate": true,
+        "lam_max": 4.0,
+        "snap_to_grid": false
+      }
     },
-    "theory_note": "original objective with postfit interval truncation; truncation can increase risk; no additional validity claim",
+    "rf_arm": {
+      "feature_map": "one-hot RF leaf indicators (Blot et al., Algorithm 1)",
+      "rf_fit_split": "D",
+      "rf_target": "log1p(minimal covering multiplier), OOB QRF quantiles",
+      "n_trees": 3,
+      "max_depth": 3,
+      "min_samples_leaf": 60,
+      "ridge": 0.0,
+      "bounds": "theta_j in [exp(-LAM_MAX)/T, 1/T] (no truncation needed)"
+    },
+    "theory_note": "task adaptation of the authors' objective; truncation (linear arm) can increase risk; no additional validity claim",
     "lambda_grid_applies": false
   },
-  "data_file": "/home/bresende/projects/pesquisa/CRC_rectification/experiments/data_insurance/insurance.csv",
+  "data_file": "/content/drive/MyDrive/PythonReCIRC/data_insurance/insurance.csv",
   "alpha": 0.1,
   "n_trials": 20,
   "seed": 42,
   "risk_model": "tabicl",
   "recirc_enabled": true,
+  "recirc_oob_context": false,
   "tabicl_device": "cuda",
   "n_obs": 1338,
   "n_features": 11,
@@ -271,5 +288,5 @@
   "slice_nmin": 30,
   "n_bins": 5,
   "mean_crc_train_test_gap": -0.0013550959527492523,
-  "elapsed_seconds": 85.62512421607971
+  "elapsed_seconds": 274.92059326171875
 }

@@ -1,6 +1,12 @@
 {
   "experiment": "synthetic_heteroscedastic_regression",
-  "protocol": "fair_labeled_budget_D_union_C",
+  "sigma_scenario": "abs",
+  "protocol": {
+    "crc": "D u C",
+    "aacrc_poly": "theta on C; ridge=0.001 without intercept",
+    "aacrc_rf": "RF (Blot et al. Alg. 1) on |residuals| of D; theta on C; no ridge; bounds [0, lambda_max]",
+    "recirc": "risk surface on D; budget on C"
+  },
   "arguments": {
     "trials": 20,
     "seed": 2026,
@@ -13,8 +19,15 @@
     "a_points": 101,
     "lambda_max": 4.0,
     "k_aug": 15,
+    "sigma": "abs",
+    "aacrc_basis": "both",
+    "aacrc_poly_split": "cal",
+    "poly_ridge_intercept": false,
+    "rf_trees": 3,
+    "rf_depth": 4,
+    "rf_min_leaf": 100,
     "device": "auto",
-    "output_dir": "/content/drive/MyDrive/PythonReCIRC/results/run_experiment_heteroscedastic",
+    "output_dir": "/content/drive/MyDrive/PythonReCIRC/results/experiment_heteroscedastic2",
     "no_plots": false,
     "device_resolved": "cuda"
   },

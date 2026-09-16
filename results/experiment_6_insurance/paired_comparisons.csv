@@ -1,7 +1,19 @@
 comparison,metric,n_trials,mean_diff,sd_diff,win_rate_first
-"ReCIRC-TabICL − AA-CRC (official objective, truncated)",worst_slice,20,-0.01603614954560185,0.053286598231213296,0.65
-"ReCIRC-TabICL − AA-CRC (official objective, truncated)",test_risk,20,0.007114429357855473,0.01202195469719878,0.25
-"ReCIRC-TabICL − AA-CRC (official objective, truncated)",avg_width,20,-2618.0231815157013,911.7923239451969,1.0
-"AA-CRC (official objective, truncated) − CRC marginal",worst_slice,20,-0.04775813812107658,0.0734747809721785,0.7
-"AA-CRC (official objective, truncated) − CRC marginal",test_risk,20,-0.0033084604473997683,0.010102622916299446,0.55
-"AA-CRC (official objective, truncated) − CRC marginal",avg_width,20,272.28226354695124,987.3905372052988,0.35
+ReCIRC-TabICL − AA-CRC (RF leaves),worst_slice,20,-0.06783174716902667,0.07975958779462747,0.8
+ReCIRC-TabICL − AA-CRC (RF leaves),test_risk,20,-0.00353233681129876,0.013962945822946944,0.55
+ReCIRC-TabICL − AA-CRC (RF leaves),avg_width,20,-1606.5909935979753,943.0687619745887,0.95
+"ReCIRC-TabICL − AA-CRC (linear, truncated)",worst_slice,20,-0.035160995146572775,0.06013750971886334,0.75
+"ReCIRC-TabICL − AA-CRC (linear, truncated)",test_risk,20,-0.004527361686920653,0.012319308551570178,0.65
+"ReCIRC-TabICL − AA-CRC (linear, truncated)",avg_width,20,-1462.010200021389,886.39708009779,1.0
+ReCIRC-TabICL − CRC marginal,worst_slice,20,-0.06379428766667843,0.07129122780698768,0.85
+ReCIRC-TabICL − CRC marginal,test_risk,20,0.0038059689104557037,0.014644536173255462,0.45
+ReCIRC-TabICL − CRC marginal,avg_width,20,-2345.74091796875,1161.2186296649647,1.0
+"AA-CRC (RF leaves) − AA-CRC (linear, truncated)",worst_slice,20,0.03267075202245388,0.07786153519100393,0.35
+"AA-CRC (RF leaves) − AA-CRC (linear, truncated)",test_risk,20,-0.0009950248756218929,0.011534069000438229,0.6
+"AA-CRC (RF leaves) − AA-CRC (linear, truncated)",avg_width,20,144.58079357658616,1070.481494230572,0.4
+AA-CRC (RF leaves) − CRC marginal,worst_slice,20,0.004037459502348242,0.06907818931069636,0.5
+AA-CRC (RF leaves) − CRC marginal,test_risk,20,0.007338305721754465,0.007725790636250003,0.1
+AA-CRC (RF leaves) − CRC marginal,avg_width,20,-739.1499243707747,782.212497724265,0.85
+"AA-CRC (linear, truncated) − CRC marginal",worst_slice,20,-0.02863329252010565,0.06648218624449935,0.65
+"AA-CRC (linear, truncated) − CRC marginal",test_risk,20,0.008333330597376357,0.010418260653554985,0.35
+"AA-CRC (linear, truncated) − CRC marginal",avg_width,20,-883.7307179473607,1059.4338176471676,0.9
