@@ -3,7 +3,7 @@
   "aacrc": {
     "source_commit": "64504c011ac2db910e258037e48170a63381b5e6",
     "source_sha256": "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315",
-    "source_path": "/content/drive/MyDrive/PythonReCIRC/AA-CRC/multiaccurate_cp/utils/multiaccurate.py",
+    "source_path": "/tmp/recirc-aacrc-validation/multiaccurate_cp/utils/multiaccurate.py",
     "integration": "serial",
     "ridge": 0.01,
     "maxiter": 200,
@@ -17,7 +17,7 @@
     "postfit_scalar_calibration": false,
     "theory_note": "task-specific adaptation of the authors' objective; no additional validity claim"
   },
-  "data_file": "/content/drive/MyDrive/PythonReCIRC/data_superconductor/train.csv",
+  "data_file": "/home/bresende/projects/pesquisa/CRC_rectification/experiments/data_superconductor/train.csv",
   "recirc_enabled": true,
   "slice_selection": "top-2 absolute target correlations on full data; exploratory",
   "alpha": 0.1,
@@ -29,7 +29,8 @@
     "range_ThermalConductivity",
     "wtd_std_ThermalConductivity"
   ],
-  "slice_bins": 4,
+  "slice_bins": 2,
+  "save_predictions": false,
   "risk_backend": "tabicl",
   "tabicl_device": "cuda",
   "tabicl_context_size": 4000,
@@ -273,5 +274,5 @@
     "min_samples_leaf": 40
   },
   "slice_nmin": 50,
-  "elapsed_seconds": 1357.0684823989868
+  "elapsed_seconds": 809.8289914131165
 }

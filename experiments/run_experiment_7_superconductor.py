@@ -548,12 +548,12 @@ def feats(X: np.ndarray, q_med: np.ndarray, s_neg: np.ndarray, s_pos: np.ndarray
 # -----------------------------------------------------------------------------
 
 
-def crc_upper_bound(mean_loss: np.ndarray, n: int, B: float = B_LOSS) -> np.ndarray:
+def crc_upper_bound(mean_loss: np.ndarray, n: int, B: float = 0.8) -> np.ndarray:
     """Finite-sample CRC upper bound (n / (n + 1)) * Rhat + B / (n + 1)."""
     return (n / (n + 1.0)) * mean_loss + B / (n + 1.0)
 
 
-def crc_global(loss_cal: np.ndarray, alpha: float = ALPHA, B: float = B_LOSS) -> int:
+def crc_global(loss_cal: np.ndarray, alpha: float = ALPHA, B: float = 0.8) -> int:
     """Marginal CRC: smallest lambda index whose CRC bound is below alpha."""
     n = loss_cal.shape[0]
     rhat = loss_cal.mean(0)
@@ -625,6 +625,12 @@ def invert_risk(R: np.ndarray, a: float) -> np.ndarray:
     return np.where(ok.any(1), np.argmax(ok, 1), R.shape[1] - 1)
 
 
+try:
+    from .risk_calibration import RiskCalibration
+except ImportError:
+    from risk_calibration import RiskCalibration
+
+
 def run_recirc(
     F_D: np.ndarray,
     L_D: np.ndarray,
@@ -635,6 +641,7 @@ def run_recirc(
     alpha: float,
     seed: int,
     backend: str = RISK_BACKEND,
+    return_risk: bool = False,
 ) -> Tuple[np.ndarray, float]:
     """Fit the ReCIRC risk surface on D and calibrate the risk budget on C.
 
@@ -643,6 +650,8 @@ def run_recirc(
     saturates early while attention cost is quadratic in the context length.
 
     Returns the selected lambda index per test point and the calibrated budget.
+    With ``return_risk=True``, also returns the already-computed held-out risk
+    surface used by the model-independent calibration diagnostic.
     """
     idx = np.linspace(0, len(lam_grid) - 1, N_LAM_TRAIN, dtype=int)
     lam_train = lam_grid[idx]
@@ -667,6 +676,8 @@ def run_recirc(
     v = np.where(bound <= alpha)[0]
     a_hat = a_grid[v[-1]] if len(v) else a_grid[0]
 
+    if return_risk:
+        return invert_risk(R_T, a_hat), float(a_hat), R_T
     return invert_risk(R_T, a_hat), float(a_hat)
 
 
@@ -717,6 +728,8 @@ def run_one_trial(
     alpha: float = ALPHA,
     backend: str = RISK_BACKEND,
     use_recirc: bool = True,
+    diagnostic: Optional[RiskCalibration] = None,
+    save_predictions: bool = False,
 ) -> Tuple[List[Dict], List[Dict]]:
     """Run the three arms on a single split and collect summary and slice rows."""
     n = len(X)
@@ -759,11 +772,12 @@ def run_one_trial(
     outs[METHOD_AACRC] = (loss_aa, width_aa)
     selected[METHOD_AACRC] = float(np.mean(lam_aa))
     saturation[METHOD_AACRC] = float(diag_lam["rate_at_lam_max"])
-    if AACRC_OUTPUT_DIR is not None:
+    if save_predictions and AACRC_OUTPUT_DIR is not None:
         pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
                       "loss": loss_aa, "width": width_aa}).to_csv(
             AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
         )
+    if AACRC_OUTPUT_DIR is not None:
         path = AACRC_OUTPUT_DIR / f"aacrc_diagnostics_trial_{trial:03d}.json"
         if path.exists():
             payload = json.loads(path.read_text())
@@ -772,7 +786,18 @@ def run_one_trial(
 
     # --- Arm 3: ReCIRC, risk model on D, budget calibrated on C --------------
     if use_recirc:
-        idx_rc, a_hat = run_recirc(F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, backend)
+        recirc_result = run_recirc(
+            F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam,
+            alpha, seed, backend, return_risk=diagnostic is not None,
+        )
+        idx_rc, a_hat = recirc_result[:2]
+        if diagnostic is not None:
+            losses_by_budget = np.column_stack(
+                [L_T[ar, invert_risk(recirc_result[2], a)] for a in A_GRID]
+            )
+            diagnostic.add_trial(
+                A_GRID, losses_by_budget, sl, trial=trial, seed=seed, a_hat=a_hat
+            )
         outs[METHOD_RECIRC] = (L_T[ar, idx_rc], W_T[ar, idx_rc])
         selected[METHOD_RECIRC] = float(a_hat)
         saturation[METHOD_RECIRC] = float((idx_rc == top).mean())
@@ -1058,6 +1083,7 @@ def parse_args():
         help="Backbone do regressor de risco do ReCIRC.",
     )
     parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
+    parser.add_argument("--save-predictions", action="store_true", help="Salva CSVs AA-CRC por observação/trial.")
     parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
     parser.add_argument("--aacrc-integration", choices=["serial", "parallel"], default="serial")
     parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE)
@@ -1114,12 +1140,16 @@ def main():
 
     summary_rows: List[Dict] = []
     slice_rows: List[Dict] = []
+    risk_diagnostic = RiskCalibration(ylabel="Average loss (exploratory slices)")
 
     t0 = time.time()
     for t in range(n_trials):
         seed = base_seed + t
         s_rows, sl_rows = run_one_trial(
-            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha, backend=backend, use_recirc=use_recirc
+            trial=t, seed=seed, X=X, Y=Y, slice_fn=slice_fn, alpha=alpha,
+            backend=backend, use_recirc=use_recirc,
+            diagnostic=risk_diagnostic if use_recirc else None,
+            save_predictions=args.save_predictions,
         )
         summary_rows.extend(s_rows)
         slice_rows.extend(sl_rows)
@@ -1128,6 +1158,8 @@ def main():
 
         if (t + 1) % 5 == 0 or (t + 1) == n_trials:
             print(f"trial {t + 1}/{n_trials} | {time.time() - t0:.0f}s acumulados")
+
+    risk_diagnostic.save(output_dir, make_plot=not args.no_plots)
 
     df = pd.DataFrame(summary_rows)
     df_slices = pd.DataFrame(slice_rows)
@@ -1189,6 +1221,7 @@ def main():
         "n_features": int(X.shape[1]),
         "slice_features": list(slice_features),
         "slice_bins": int(args.slice_bins),
+        "save_predictions": bool(args.save_predictions),
         "risk_backend": str(backend) if use_recirc else None,
         "tabicl_device": str(TABICL_DEVICE),
         "tabicl_context_size": int(N_D_TABICL),
