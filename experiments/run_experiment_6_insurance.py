@@ -1,27 +1,41 @@
 #!/usr/bin/env python
-"""Medical Insurance: marginal CRC, truncated AA-CRC, and ReCIRC.
+"""Medical Insurance: marginal CRC, AA-CRC (authors' objective; linear and RF-leaf feature maps) and ReCIRC.
 
-Uses J/J_prime from the pinned local AA-CRC repository, with SLSQP and the
-exact asymmetric-loss encoding used in Experiment 7. One lower-tail label
-and four upper-tail labels encode weights (0.2, 0.8). The affine learned
-threshold is u(x); raw interval multipliers are max(0, -log(u)) for u > 0 and
-infinity otherwise. This is a task adaptation of the original objective,
-not an unchanged reproduction of the authors' regression experiment.
+AA-CRC arms (--aacrc-basis {linear, rf, both}; default both)
+------------------------------------------------------------
+Both arms call J / J_prime from the pinned authors' module (SHA-256 checked) and
+use the exact asymmetric-loss encoding of Experiment 7: one lower-tail and four
+upper-tail auxiliary labels encode the weights (0.2, 0.8). The learned
+threshold is u(x) = Phi(x) @ theta and the interval multiplier is
+max(0, -log u) for u > 0. theta is always fitted on the independent split C.
 
-QRF and feature standardization use D; AA-CRC uses independent C, with sample
-correction 1/len(C). No least-squares surrogate or scalar-offset calibration.
-At prediction time AA-CRC multipliers are clipped to [0, LAM_MAX=4], including
-infinite raw multipliers. They remain continuous. Fitting and loss-encoding
-checks use the untruncated mapping. Truncation can increase miscoverage; its
-frequency and risk increase are reported. CRC/ReCIRC retain the previous
-finite lambda grid and ReCIRC's fixed 201-point budget grid on [0, 1]. Their
-finite-grid fallback is inherited and is not a fully protective endpoint.
+* AA-CRC (RF leaves): the tabular procedure of Blot et al. (AISTATS 2025,
+  Sec. 3, Algorithm 1). A random forest is trained on D to predict the minimal
+  covering multiplier of each point (log1p scale), computed from OUT-OF-BAG QRF
+  quantiles so that the D residuals are not shrunk by in-sample fitting.
+  Phi(x) is the one-hot vector of the leaves reached by x. No ridge (as in the
+  authors' notebook); box constraints keep u in [exp(-LAM_MAX), 1], so the
+  multiplier never exceeds LAM_MAX and no deployment truncation is needed.
+  Defaults (3 trees, depth 3, 60 per leaf) are sized for n ~ 1338 (|C| ~ 401).
+* AA-CRC (linear, truncated): Phi(x) = [1, standardized one-hot covariates].
+  The ridge excludes the intercept by default, so by Theorem 1 of Blot et al.
+  the marginal level is not shifted by -2*rho*theta_0 (--aacrc-ridge-intercept
+  restores the authors' full ridge). Multipliers are clipped to [0, LAM_MAX] at
+  deployment; truncation can increase miscoverage and is reported.
 
-Results go to a separate directory. Original scripts and author source are
-preserved. --self-check validates the encoding, objective, gradient and fit
-using only NumPy/SciPy, including finite deployment and JSON diagnostics.
---no-recirc runs CRC and AA-CRC without TabICL. This variant adds no validity
-guarantee for the intervals after truncation.
+--aacrc-features {x, feats} chooses the covariates given to both arms: the raw
+one-hot covariates (authors' choice) or the same feature map used by ReCIRC.
+--recirc-oob-context builds ReCIRC's context losses from OOB QRF quantiles.
+
+This is a task adaptation of the authors' objective, not an unchanged
+reproduction of their regression experiment; no additional validity claim.
+CRC/ReCIRC retain the finite lambda grid and the fixed 201-point budget grid.
+For the RF arm, the worst risk inside its own leaves on the test split is also
+reported (own_group_worst).
+
+Results go to a separate directory. --self-check validates the encoding,
+objective, gradient and both fits (scikit-learn needed for the RF check).
+--no-recirc runs CRC and AA-CRC without TabICL.
 """
 
 from __future__ import annotations
@@ -52,6 +66,12 @@ AACRC_OUTPUT_DIR = None
 AACRC_MODULE = None
 # Shared cap is available before the lightweight --self-check entry point.
 LAM_MAX = 4.0
+
+# RF leaf feature map (Blot et al., Algorithm 1), sized for |D| ~ 535, |C| ~ 401.
+RF_TREES = 3
+RF_DEPTH = 3
+RF_MIN_LEAF = 60
+RF_LEAF_NMIN_DIAG = 30
 
 
 def load_original_aacrc(repo, integration="serial"):
@@ -139,33 +159,49 @@ def aacrc_truncation_diagnostics(u, lam_max=LAM_MAX):
     }
 
 
-def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
-                       alpha=0.1, ridge=0.01, maxiter=200, module=None,
-                       diagnostic_path=None):
-    """Optimize the original regularized AA-CRC objective on independent C."""
+def _aacrc_objective(module, labels, scores, phi, alpha, n, ridge, ridge_mask):
+    """Authors' J / J_prime (no internal regularization) plus an external ridge.
+
+    With a mask of ones this equals the authors' ridge; with ridge_mask[0] = 0 the
+    intercept is free and, by Theorem 1 of Blot et al., the marginal level is not
+    shifted.
+    """
+    mask = np.asarray(ridge_mask, dtype=float)
+
+    def objective(theta):
+        value = module.J(theta, labels, scores, phi, alpha, n, None, None)
+        return float(value + ridge * np.sum(mask * theta ** 2))
+
+    def gradient(theta):
+        grad = np.asarray(module.J_prime(theta, labels, scores, phi, alpha, n, None, None), dtype=float)
+        return grad + 2.0 * ridge * mask * theta
+
+    return objective, gradient
+
+
+def fit_aacrc_core(phi, y_C, median_C, s_neg_C, s_pos_C, *, alpha, ridge, ridge_mask,
+                   theta0, bounds=None, maxiter=200, module=None, extra_diag=None):
+    """Optimize the authors' AA-CRC objective for a given feature matrix on C."""
     if module is None:
         module = load_original_aacrc(AACRC_REPO, AACRC_INTEGRATION)
+    phi = np.asarray(phi, dtype=float)
     n = len(y_C)
     if not 0 < alpha < 1 or n <= 1.0 / alpha:
         raise ValueError("Need 0 < alpha < 1 and len(C) > 1/alpha for this AA-CRC fit.")
     if ridge < 0 or maxiter < 1:
         raise ValueError("ridge must be nonnegative and maxiter positive.")
-    center = np.asarray(X_D, float).mean(axis=0)
-    scale = np.asarray(X_D, float).std(axis=0)
-    scale = np.where(scale > 0, scale, 1.0)
-    phi = np.column_stack([np.ones(n), (np.asarray(X_C, float) - center) / scale])
+    if phi.shape[0] != n or not np.isfinite(phi).all():
+        raise ValueError("Feature matrix must be finite with one row per calibration point.")
     labels, scores = auxiliary_tail_labels(y_C, median_C, s_neg_C, s_pos_C)
-    theta = np.zeros(phi.shape[1])
-    theta[0] = 0.5
-    regularization = "ridge" if ridge > 0 else None
-    arguments = (labels, scores, phi, alpha, n, regularization, ridge)
+    objective, gradient = _aacrc_objective(module, labels, scores, phi, alpha, n, ridge, ridge_mask)
+    theta = np.asarray(theta0, dtype=float).copy()
     attempts = []
     start = time.time()
     success = False
+    result = None
     for iterations in (maxiter, 3 * maxiter):
-        result = minimize(module.J, theta, method="SLSQP", jac=module.J_prime,
-                          args=arguments, tol=1e-8,
-                          options={"maxiter": iterations, "disp": False})
+        result = minimize(objective, theta, method="SLSQP", jac=gradient, bounds=bounds,
+                          tol=1e-8, options={"maxiter": iterations, "disp": False})
         success = bool(result.success and np.isfinite(result.x).all() and np.isfinite(result.fun))
         attempts.append({"success": success, "status": int(result.status),
                          "message": str(result.message), "iterations": int(result.nit),
@@ -175,9 +211,13 @@ def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
         if np.isfinite(result.x).all():
             theta = result.x.copy()
     diag = {"source_commit": AACRC_COMMIT, "source_sha256": AACRC_SOURCE_SHA256,
-            "fit_split": "C", "feature_standardization_split": "D", "n_fit": n,
-            "n_auxiliary_labels_per_observation": 5, "ridge": ridge,
+            "fit_split": "C", "n_fit": n, "n_params": int(phi.shape[1]),
+            "n_auxiliary_labels_per_observation": 5, "ridge": float(ridge),
+            "ridge_on_intercept": bool(ridge > 0 and np.asarray(ridge_mask)[0] > 0),
+            "bounds": None if bounds is None else [list(bounds[0])],
             "success": success, "attempts": attempts, "elapsed_seconds": time.time() - start}
+    if extra_diag:
+        diag.update(extra_diag)
     if success:
         theta = result.x.copy()
         u = phi @ theta
@@ -188,26 +228,138 @@ def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
         loss, _, _ = evaluate_aacrc_intervals(y_C, median_C, s_neg_C, s_pos_C, u, lam_max=None)
         deployed_loss, _, _ = evaluate_aacrc_intervals(y_C, median_C, s_neg_C, s_pos_C, u)
         encoded_loss = module._I_prime_list(labels, scores, np.maximum(u, 0.0), alpha, n) + alpha - 1.0 / n
-        diag.update({"theta": theta.tolist(), "center": center.tolist(), "scale": scale.tolist(),
+        diag.update({"theta": theta.tolist(),
                      "fit_risk": float(loss.mean()),
                      "fit_risk_truncated": float(deployed_loss.mean()),
                      "fit_truncation": aacrc_truncation_diagnostics(u),
+                     "stationarity_target": float(alpha - 1.0 / n),
                      "encoding_max_abs_error": float(np.max(np.abs(loss - encoded_loss))),
                      "threshold_min": float(u.min()), "threshold_max": float(u.max())})
+        if bounds is not None:
+            lo = np.array([b[0] for b in bounds])
+            hi = np.array([b[1] for b in bounds])
+            at_bound = np.isclose(theta, lo, rtol=0, atol=1e-9) | np.isclose(theta, hi, rtol=0, atol=1e-9)
+            diag["rate_theta_at_bound"] = float(at_bound.mean())
         if diag["encoding_max_abs_error"] > 1e-10:
             success = False
             diag["success"] = False
             diag["error"] = "Interval/auxiliary-label losses disagree (check numerical boundary ties)."
-    if diagnostic_path is not None:
-        Path(diagnostic_path).write_text(json.dumps(diag, indent=2, allow_nan=False))
     if not success:
         raise RuntimeError("Original AA-CRC optimization failed: " + json.dumps(diag))
-    return {"theta": theta, "center": center, "scale": scale, "diagnostics": diag}
+    return {"theta": theta, "diagnostics": diag}
+
+
+def fit_original_aacrc(X_D, X_C, y_C, median_C, s_neg_C, s_pos_C,
+                       alpha=0.1, ridge=0.01, maxiter=200, module=None,
+                       diagnostic_path=None, ridge_intercept=False):
+    """Linear AA-CRC: Phi = [1, covariates standardized with D statistics], theta on C."""
+    center = np.asarray(X_D, float).mean(axis=0)
+    scale = np.asarray(X_D, float).std(axis=0)
+    scale = np.where(scale > 0, scale, 1.0)
+    phi = np.column_stack([np.ones(len(y_C)), (np.asarray(X_C, float) - center) / scale])
+    theta0 = np.zeros(phi.shape[1])
+    theta0[0] = 0.5
+    mask = np.ones(phi.shape[1])
+    if not ridge_intercept:
+        mask[0] = 0.0
+    fit = fit_aacrc_core(
+        phi, y_C, median_C, s_neg_C, s_pos_C, alpha=alpha, ridge=ridge, ridge_mask=mask,
+        theta0=theta0, maxiter=maxiter, module=module,
+        extra_diag={"feature_map": "linear", "feature_standardization_split": "D"},
+    )
+    fit["diagnostics"].update({"center": center.tolist(), "scale": scale.tolist()})
+    if diagnostic_path is not None:
+        Path(diagnostic_path).write_text(json.dumps(fit["diagnostics"], indent=2, allow_nan=False))
+    fit.update({"center": center, "scale": scale, "kind": "linear"})
+    return fit
 
 
 def predict_original_aacrc(fit, X):
     phi = np.column_stack([np.ones(len(X)), (np.asarray(X, float) - fit["center"]) / fit["scale"]])
     return phi @ fit["theta"]
+
+
+# -----------------------------------------------------------------------------
+# AA-CRC with random-forest leaf indicators (Blot et al., Algorithm 1)
+# -----------------------------------------------------------------------------
+
+
+def minimal_cover_multiplier(y, median, s_neg, s_pos):
+    """Smallest interval multiplier that covers y (zero loss); RF target on D."""
+    y, median, s_neg, s_pos = [np.asarray(v, dtype=float) for v in (y, median, s_neg, s_pos)]
+    return np.maximum.reduce([(median - y) / s_neg, (y - median) / s_pos, np.zeros_like(y)])
+
+
+class LeafFeatureMap:
+    """Phi(x) = one-hot indicators of the leaves reached by x in each tree."""
+
+    def __init__(self, Z_res, target, n_trees=RF_TREES, max_depth=RF_DEPTH,
+                 min_leaf=RF_MIN_LEAF, seed=0):
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.preprocessing import OneHotEncoder
+
+        Z_res = np.asarray(Z_res, dtype=float)
+        self.rf = RandomForestRegressor(
+            n_estimators=n_trees, max_depth=max_depth, min_samples_leaf=min_leaf,
+            n_jobs=-1, random_state=seed,
+        ).fit(Z_res, np.asarray(target, dtype=float))
+        try:
+            encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        except TypeError:  # scikit-learn < 1.2
+            encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
+        self.encoder = encoder.fit(self.rf.apply(Z_res))
+        self.n_trees = int(n_trees)
+
+    def __call__(self, Z):
+        return self.encoder.transform(self.rf.apply(np.asarray(Z, dtype=float))).astype(float)
+
+    @property
+    def n_leaves(self):
+        return int(sum(len(c) for c in self.encoder.categories_))
+
+
+def leaf_risks(loss, phi, nmin=RF_LEAF_NMIN_DIAG):
+    """Risk inside each leaf (group) with at least nmin points."""
+    counts = phi.sum(axis=0)
+    risk = (phi * np.asarray(loss, float)[:, None]).sum(axis=0) / np.maximum(counts, 1.0)
+    return risk[counts >= nmin]
+
+
+def fit_aacrc_rf(leaf_map, Z_C, y_C, median_C, s_neg_C, s_pos_C, *, alpha, lam_init,
+                 lam_max=LAM_MAX, maxiter=200, module=None, diagnostic_path=None):
+    """RF-leaf AA-CRC: theta on C, no ridge, box constraints.
+
+    Each tree contributes exactly one active indicator, so u(x) is the sum of one
+    coefficient per tree. Bounds theta_j in [exp(-lam_max)/T, 1/T] keep u in
+    [exp(-lam_max), 1], i.e. the multiplier -log(u) in [0, lam_max].
+    """
+    phi = leaf_map(Z_C)
+    T = leaf_map.n_trees
+    lower, upper = float(np.exp(-lam_max)) / T, 1.0 / T
+    theta0 = np.full(phi.shape[1], np.clip(np.exp(-lam_init) / T, lower, upper))
+    fit = fit_aacrc_core(
+        phi, y_C, median_C, s_neg_C, s_pos_C, alpha=alpha, ridge=0.0,
+        ridge_mask=np.zeros(phi.shape[1]), theta0=theta0,
+        bounds=[(lower, upper)] * phi.shape[1], maxiter=maxiter, module=module,
+        extra_diag={"feature_map": "rf_leaves", "n_trees": T, "n_leaves": leaf_map.n_leaves,
+                    "rf_max_depth": leaf_map.rf.max_depth,
+                    "rf_min_samples_leaf": leaf_map.rf.min_samples_leaf},
+    )
+    loss, _, _ = evaluate_aacrc_intervals(y_C, median_C, s_neg_C, s_pos_C, phi @ fit["theta"],
+                                          lam_max=None)
+    r = leaf_risks(loss, phi)
+    fit["diagnostics"].update({
+        "fit_worst_leaf_risk": float(r.max()) if r.size else None,
+        "fit_n_populated_leaves": int(r.size),
+    })
+    if diagnostic_path is not None:
+        Path(diagnostic_path).write_text(json.dumps(fit["diagnostics"], indent=2, allow_nan=False))
+    fit.update({"leaf_map": leaf_map, "kind": "rf"})
+    return fit
+
+
+def predict_aacrc_rf(fit, Z):
+    return fit["leaf_map"](Z) @ fit["theta"]
 
 
 def check_original_aacrc(repo):
@@ -264,10 +416,30 @@ def check_original_aacrc(repo):
     fit = fit_original_aacrc(X_D, X_C, y, median, s_neg, s_pos, alpha=alpha, module=module)
     test_u = predict_original_aacrc(fit, X_C[:8])
     assert test_u.shape == (8,) and np.isfinite(test_u).all()
+    objective, grad_fn = _aacrc_objective(module, labels, scores, phi, alpha, n, ridge,
+                                          np.r_[0.0, np.ones(phi.shape[1] - 1)])
+    manual = module.J(theta, labels, scores, phi, alpha, n, None, None) + ridge * np.sum(theta[1:] ** 2)
+    assert abs(objective(theta) - manual) < 1e-12
+    assert np.allclose(grad_fn(theta)[0], expected_gradient[0] - 2 * ridge * theta[0], atol=1e-12)
+    rf_report = "skipped (scikit-learn unavailable)"
+    try:
+        leaf_map = LeafFeatureMap(X_D, rng.gamma(2.0, size=len(X_D)), n_trees=3, max_depth=2,
+                                  min_leaf=10, seed=0)
+        rf_fit = fit_aacrc_rf(leaf_map, X_C, y, median, s_neg, s_pos, alpha=alpha,
+                              lam_init=1.0, lam_max=LAM_MAX, module=module)
+        u_rf = predict_aacrc_rf(rf_fit, X_C)
+        assert np.all(u_rf >= np.exp(-LAM_MAX) - 1e-9) and np.all(u_rf <= 1.0 + 1e-9)
+        rf_report = {"n_leaves": leaf_map.n_leaves,
+                     "fit_risk": rf_fit["diagnostics"]["fit_risk"],
+                     "rate_theta_at_bound": rf_fit["diagnostics"]["rate_theta_at_bound"]}
+    except ImportError:
+        pass
     print(json.dumps({"loss_identity_max_error": max_loss_error,
                       "official_quadrature_abs_error": quadrature_error,
                       "gradient_check": "passed", "truncation_check": "passed",
-                      "optimizer": fit["diagnostics"]}, indent=2, allow_nan=False))
+                      "ridge_without_intercept_check": "passed",
+                      "optimizer": fit["diagnostics"], "rf_leaf_check": rf_report},
+                     indent=2, allow_nan=False))
 
 
 # This check deliberately runs before importing QRF, Torch or TabICL.
@@ -353,19 +525,28 @@ except Exception:
 
 # Detect Google Drive mounted (Colab) and use as default
 if os.path.isdir("/content/drive"):
-    OUT_DIR = "/content/drive/MyDrive/PythonReCIRC/results/experiment_6_insurance_official_aacrc2_truncated_fixed_budget_grid"
+    OUT_DIR = "/content/drive/MyDrive/PythonReCIRC/results/experiment_6_insurance_official_aacrc_rf_leaves"
 else:
-    OUT_DIR = "insurance_official_aacrc2_truncated_recirc_results_fixed_budget_grid"
+    OUT_DIR = "insurance_official_aacrc_rf_leaves_results"
 
 # Method labels (kept stable across CSV outputs and figures).
 METHOD_CRC = "CRC marginal"
-METHOD_AACRC = "AA-CRC (official objective, truncated)"
+METHOD_AACRC_LIN = "AA-CRC (linear, truncated)"
+METHOD_AACRC_RF = "AA-CRC (RF leaves)"
 METHOD_RECIRC_TABICL = "ReCIRC-TabICL"
 METHOD_RECIRC_HGB = "ReCIRC-HGB"
+AACRC_METHODS = (METHOD_AACRC_RF, METHOD_AACRC_LIN)
+
+# Set from the command line in main().
+AACRC_BASIS = "both"
+AACRC_FEATURES = "x"
+AACRC_RIDGE_INTERCEPT = False
+RECIRC_OOB_CONTEXT = False
 
 PALETTE = {
     METHOD_CRC: "#1f77b4",
-    METHOD_AACRC: "#ff7f0e",
+    METHOD_AACRC_LIN: "#ff7f0e",
+    METHOD_AACRC_RF: "#9467bd",
     METHOD_RECIRC_TABICL: "#d62728",
     METHOD_RECIRC_HGB: "#2ca02c",
 }
@@ -459,11 +640,13 @@ def describe_interaction(data: InsuranceData) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 
 
-def fit_qrf(data: InsuranceData, idx_D: np.ndarray, seed: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def fit_qrf(data: InsuranceData, idx_D: np.ndarray, seed: int):
     """Fit the QRF scaffold on D and predict the (lo, med, hi) quantiles for all rows.
 
-    The lower and upper quantiles are clipped against the median so that the
-    resulting asymmetric scales are non-negative by construction.
+    Returns two triples: the usual predictions for all rows, and a copy in which
+    the D rows are replaced by out-of-bag predictions (residuals on D are then
+    not shrunk by in-sample fitting). The lower and upper quantiles are clipped
+    against the median so that the asymmetric scales are non-negative.
     """
     try:
         from quantile_forest import RandomForestQuantileRegressor
@@ -479,9 +662,15 @@ def fit_qrf(data: InsuranceData, idx_D: np.ndarray, seed: int) -> Tuple[np.ndarr
     ).fit(data.X[idx_D], data.Y[idx_D])
 
     Q = qrf.predict(data.X, quantiles=[Q_LO, Q_MED, Q_HI])
-    lo = np.minimum(Q[:, 0], Q[:, 1]).astype(np.float32)
-    hi = np.maximum(Q[:, 2], Q[:, 1]).astype(np.float32)
-    return lo, Q[:, 1].astype(np.float32), hi
+    Q_oob = Q.copy()
+    Q_oob[idx_D] = qrf.predict(data.X[idx_D], quantiles=[Q_LO, Q_MED, Q_HI], oob_score=True)
+
+    def unpack(M):
+        lo = np.minimum(M[:, 0], M[:, 1]).astype(np.float32)
+        hi = np.maximum(M[:, 2], M[:, 1]).astype(np.float32)
+        return lo, M[:, 1].astype(np.float32), hi
+
+    return unpack(Q), unpack(Q_oob)
 
 
 def build_loss(
@@ -712,9 +901,12 @@ def run_one_trial(
     """
     idx_D, idx_C, idx_T = make_three_way_split(data.n, seed)
 
-    q_lo, q_med, q_hi = fit_qrf(data, idx_D, seed)
+    (q_lo, q_med, q_hi), (q_lo_oob, q_med_oob, q_hi_oob) = fit_qrf(data, idx_D, seed)
     LOSS, WIDTH, lam, s_neg, s_pos = build_loss(data, q_lo, q_med, q_hi)
     F = feats(data, q_med, s_neg, s_pos)
+    # OOB versions (only the D rows differ from the in-sample ones).
+    LOSS_oob, _, _, s_neg_oob, s_pos_oob = build_loss(data, q_lo_oob, q_med_oob, q_hi_oob)
+    F_oob = feats(data, q_med_oob, s_neg_oob, s_pos_oob)
 
     L_C, L_T, W_T = LOSS[idx_C], LOSS[idx_T], WIDTH[idx_T]
     ar = np.arange(len(idx_T))
@@ -724,57 +916,83 @@ def run_one_trial(
 
     outs: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     selected: Dict[str, float] = {}
+    saturation: Dict[str, float] = {}
+    own_groups: Dict[str, float] = {}
+
+    # Covariates given to both AA-CRC arms (raw one-hot X by default, or ReCIRC's feats).
+    if AACRC_FEATURES == "feats":
+        Z_D, Z_C, Z_T = F_oob[idx_D], F[idx_C], F[idx_T]
+    else:
+        Z_D, Z_C, Z_T = data.X[idx_D], data.X[idx_C], data.X[idx_T]
+    aa_args = (data.Y[idx_C], q_med[idx_C], s_neg[idx_C], s_pos[idx_C])
 
     # --- Arm 1: marginal CRC -------------------------------------------------
     j = crc_global(L_C, alpha)
     crc_gap = float(LOSS[idx_D][:, j].mean() - L_T[:, j].mean())
     outs[METHOD_CRC] = (L_T[:, j], W_T[:, j])
     selected[METHOD_CRC] = float(lam[j])
+    saturation[METHOD_CRC] = float(j == len(lam) - 1)
 
-    # --- Arm 2: authors' AA-CRC objective fitted on independent C ------------
-    diagnostic_path = (AACRC_OUTPUT_DIR / f"aacrc_diagnostics_trial_{trial:03d}.json"
-                       if AACRC_OUTPUT_DIR is not None else None)
-    fit = fit_original_aacrc(
-        data.X[idx_D], data.X[idx_C], data.Y[idx_C], q_med[idx_C], s_neg[idx_C], s_pos[idx_C],
-        alpha=alpha, ridge=AACRC_RIDGE, maxiter=AACRC_MAXITER,
-        module=AACRC_MODULE, diagnostic_path=diagnostic_path,
-    )
-    u_aa = predict_original_aacrc(fit, data.X[idx_T])
-    loss_aa, width_aa, lam_aa = evaluate_aacrc_intervals(
-        data.Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u_aa, lam_max=float(lam[-1])
-    )
-    raw_loss_aa, _, raw_lam_aa = evaluate_aacrc_intervals(
-        data.Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u_aa, lam_max=None
-    )
-    deployment_diag = aacrc_truncation_diagnostics(u_aa, lam_max=float(lam[-1]))
-    deployment_diag.update({
-        "raw_risk": float(raw_loss_aa.mean()),
-        "truncated_risk": float(loss_aa.mean()),
-        "risk_increase": float(np.mean(loss_aa - raw_loss_aa)),
-    })
-    fit["diagnostics"]["deployment"] = deployment_diag
-    outs[METHOD_AACRC] = (loss_aa, width_aa)
-    selected[METHOD_AACRC] = float(np.mean(lam_aa))
-    if AACRC_OUTPUT_DIR is not None:
-        diagnostic_path.write_text(json.dumps(fit["diagnostics"], indent=2, allow_nan=False))
-        pd.DataFrame({"test_index": idx_T, "threshold_u": u_aa, "lambda": lam_aa,
-                      "loss": loss_aa, "width": width_aa,
-                      "was_truncated": raw_lam_aa > lam[-1],
-                      "raw_would_be_infinite": u_aa <= 0,
-                      "raw_loss": raw_loss_aa}).to_csv(
-            AACRC_OUTPUT_DIR / f"aacrc_predictions_trial_{trial:03d}.csv", index=False
+    def deploy(method, tag, fit, u):
+        loss_aa, width_aa, lam_aa = evaluate_aacrc_intervals(
+            data.Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u, lam_max=float(lam[-1])
         )
+        raw_loss_aa, _, raw_lam_aa = evaluate_aacrc_intervals(
+            data.Y[idx_T], q_med[idx_T], s_neg[idx_T], s_pos[idx_T], u, lam_max=None
+        )
+        deployment_diag = aacrc_truncation_diagnostics(u, lam_max=float(lam[-1]))
+        deployment_diag.update({
+            "raw_risk": float(raw_loss_aa.mean()),
+            "truncated_risk": float(loss_aa.mean()),
+            "risk_increase": float(np.mean(loss_aa - raw_loss_aa)),
+        })
+        fit["diagnostics"]["deployment"] = deployment_diag
+        outs[method] = (loss_aa, width_aa)
+        selected[method] = float(np.mean(lam_aa))
+        saturation[method] = deployment_diag["rate_at_lam_max"]
+        if AACRC_OUTPUT_DIR is not None:
+            (AACRC_OUTPUT_DIR / f"aacrc_{tag}_diagnostics_trial_{trial:03d}.json").write_text(
+                json.dumps(fit["diagnostics"], indent=2, allow_nan=False)
+            )
+            pd.DataFrame({"test_index": idx_T, "threshold_u": u, "lambda": lam_aa,
+                          "loss": loss_aa, "width": width_aa,
+                          "was_truncated": raw_lam_aa > lam[-1],
+                          "raw_would_be_infinite": u <= 0,
+                          "raw_loss": raw_loss_aa}).to_csv(
+                AACRC_OUTPUT_DIR / f"aacrc_{tag}_predictions_trial_{trial:03d}.csv", index=False
+            )
+        return loss_aa
 
-    saturation = {
-        METHOD_CRC: float(j == len(lam) - 1),
-        METHOD_AACRC: deployment_diag["rate_at_lam_max"],
-    }
+    # --- Arm 2a: AA-CRC, linear feature map, theta on C ------------------------
+    if AACRC_BASIS in ("linear", "both"):
+        fit_lin = fit_original_aacrc(
+            Z_D, Z_C, *aa_args, alpha=alpha, ridge=AACRC_RIDGE, maxiter=AACRC_MAXITER,
+            module=AACRC_MODULE, ridge_intercept=AACRC_RIDGE_INTERCEPT,
+        )
+        deploy(METHOD_AACRC_LIN, "linear", fit_lin, predict_original_aacrc(fit_lin, Z_T))
+
+    # --- Arm 2b: AA-CRC, RF-leaf feature map (Algorithm 1), theta on C -----------
+    if AACRC_BASIS in ("rf", "both"):
+        target_D = np.log1p(minimal_cover_multiplier(
+            data.Y[idx_D], q_med_oob[idx_D], s_neg_oob[idx_D], s_pos_oob[idx_D]
+        ))
+        leaf_map = LeafFeatureMap(Z_D, target_D, n_trees=RF_TREES, max_depth=RF_DEPTH,
+                                  min_leaf=RF_MIN_LEAF, seed=seed)
+        fit_rf = fit_aacrc_rf(
+            leaf_map, Z_C, *aa_args, alpha=alpha, lam_init=float(lam[j]), lam_max=float(lam[-1]),
+            maxiter=AACRC_MAXITER, module=AACRC_MODULE,
+        )
+        phi_T = leaf_map(Z_T)
+        loss_rf = deploy(METHOD_AACRC_RF, "rf", fit_rf, phi_T @ fit_rf["theta"])
+        r_leaf = leaf_risks(loss_rf, phi_T)
+        own_groups[METHOD_AACRC_RF] = float(r_leaf.max()) if r_leaf.size else float("nan")
 
     # --- Arm 3: ReCIRC -------------------------------------------------------
     if use_recirc:
         method_recirc = METHOD_RECIRC_TABICL if risk_model == "tabicl" else METHOD_RECIRC_HGB
+        F_ctx, L_ctx = (F_oob, LOSS_oob) if RECIRC_OOB_CONTEXT else (F, LOSS)
         recirc_result = run_recirc(
-            F[idx_D], LOSS[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, risk_model,
+            F_ctx[idx_D], L_ctx[idx_D], F[idx_C], L_C, F[idx_T], lam, alpha, seed, risk_model,
             return_risk=diagnostic is not None
         )
         idx_rc, a_hat = recirc_result[:2]
@@ -812,6 +1030,7 @@ def run_one_trial(
                 "median_width": float(np.median(width)),
                 "infinite_width_rate": float(np.isinf(width).mean()),
                 "rate_at_lam_max": saturation[method],
+                "own_group_worst": float(own_groups.get(method, float("nan"))),
                 "n_test": int(len(idx_T)),
             }
         )
@@ -879,6 +1098,7 @@ def aggregate_marginal(df_marginal: pd.DataFrame) -> pd.DataFrame:
             avg_width_mean=("avg_width", width_mean),
             infinite_width_rate=("infinite_width_rate", "mean"),
             rate_at_lam_max=("rate_at_lam_max", "mean"),
+            own_group_worst_mean=("own_group_worst", "mean"),
             avg_width_sd=("avg_width", width_sd),
         )
         .sort_values("worst_slice_mean")
@@ -920,15 +1140,15 @@ def build_paired_table(df_marginal: pd.DataFrame, methods_present: Sequence[str]
     """Assemble the paired comparisons that are meaningful given the arms that ran."""
     rows = []
     recirc = [m for m in (METHOD_RECIRC_TABICL, METHOD_RECIRC_HGB) if m in methods_present]
-    for m in recirc:
+    pairs = [(m, a) for m in recirc for a in AACRC_METHODS]
+    pairs += [(m, METHOD_CRC) for m in recirc]
+    pairs += [(METHOD_AACRC_RF, METHOD_AACRC_LIN)]
+    pairs += [(a, METHOD_CRC) for a in AACRC_METHODS]
+    for m1, m2 in pairs:
         for metric in ("worst_slice", "test_risk", "avg_width"):
-            r = paired_comparison(df_marginal, m, METHOD_AACRC, metric)
+            r = paired_comparison(df_marginal, m1, m2, metric)
             if r:
                 rows.append(r)
-    for metric in ("worst_slice", "test_risk", "avg_width"):
-        r = paired_comparison(df_marginal, METHOD_AACRC, METHOD_CRC, metric)
-        if r:
-            rows.append(r)
     return pd.DataFrame(rows)
 
 
@@ -976,7 +1196,7 @@ def save_plots(
     """Save the marginal four-panel figure and the conditional two-panel figure."""
     os.makedirs(output_dir, exist_ok=True)
 
-    order = [METHOD_CRC, METHOD_AACRC, METHOD_RECIRC_TABICL, METHOD_RECIRC_HGB]
+    order = [METHOD_CRC, METHOD_AACRC_LIN, METHOD_AACRC_RF, METHOD_RECIRC_TABICL, METHOD_RECIRC_HGB]
     methods_order = [m for m in order if m in df_marginal["method"].unique()]
     if not methods_order:
         return
@@ -1055,7 +1275,7 @@ def save_plots(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Experimento 6: Medical Insurance — CRC marginal vs AA-CRC truncado em lambda=4 vs ReCIRC."
+        description="Experimento 6: Medical Insurance — CRC marginal vs AA-CRC (linear e folhas de RF) vs ReCIRC."
     )
     parser.add_argument("--output-dir", type=str, default=None, help="Diretório para salvar resultados.")
     parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials do experimento.")
@@ -1067,7 +1287,19 @@ def parse_args():
     parser.add_argument("--no-plots", action="store_true", help="Desabilita geração de gráficos.")
     parser.add_argument("--aacrc-repo", type=Path, default=AACRC_REPO)
     parser.add_argument("--aacrc-integration", choices=["serial", "parallel"], default="serial")
-    parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE)
+    parser.add_argument("--aacrc-ridge", type=float, default=AACRC_RIDGE,
+                        help="Ridge do braço linear (só inclinações, salvo --aacrc-ridge-intercept).")
+    parser.add_argument("--aacrc-basis", choices=["linear", "rf", "both"], default="both",
+                        help="Feature map(s) do AA-CRC: linear, folhas de RF (Algoritmo 1) ou ambos.")
+    parser.add_argument("--aacrc-features", choices=["x", "feats"], default="x",
+                        help="Covariáveis do AA-CRC: X one-hot original (autores) ou as features do ReCIRC.")
+    parser.add_argument("--aacrc-ridge-intercept", action="store_true",
+                        help="Penaliza também o intercepto no braço linear (ridge original dos autores).")
+    parser.add_argument("--rf-trees", type=int, default=RF_TREES)
+    parser.add_argument("--rf-depth", type=int, default=RF_DEPTH)
+    parser.add_argument("--rf-min-leaf", type=int, default=RF_MIN_LEAF)
+    parser.add_argument("--recirc-oob-context", action="store_true",
+                        help="Perdas de contexto do ReCIRC a partir de quantis OOB da QRF em D.")
     parser.add_argument("--aacrc-maxiter", type=int, default=AACRC_MAXITER)
     parser.add_argument("--data-file", type=Path, default=Path(__file__).resolve().parent / "data_insurance/insurance.csv")
     parser.add_argument("--no-recirc", action="store_true", help="Executa apenas CRC e AA-CRC.")
@@ -1077,11 +1309,15 @@ def parse_args():
         parser.error("--trials deve ser positivo e --alpha deve estar entre 0 e 1.")
     if not np.isfinite(args.aacrc_ridge) or args.aacrc_ridge < 0 or args.aacrc_maxiter < 1:
         parser.error("--aacrc-ridge deve ser finito e não negativo; --aacrc-maxiter deve ser positivo.")
+    if min(args.rf_trees, args.rf_depth, args.rf_min_leaf) < 1:
+        parser.error("--rf-trees, --rf-depth e --rf-min-leaf devem ser positivos.")
     return args
 
 
 def main():
     global AACRC_MODULE, AACRC_OUTPUT_DIR, AACRC_RIDGE, AACRC_MAXITER
+    global AACRC_BASIS, AACRC_FEATURES, AACRC_RIDGE_INTERCEPT, RECIRC_OOB_CONTEXT
+    global RF_TREES, RF_DEPTH, RF_MIN_LEAF
     args = parse_args()
 
     alpha = args.alpha
@@ -1098,6 +1334,10 @@ def main():
     AACRC_MODULE = load_original_aacrc(args.aacrc_repo, args.aacrc_integration)
     AACRC_OUTPUT_DIR = output_dir
     AACRC_RIDGE, AACRC_MAXITER = args.aacrc_ridge, args.aacrc_maxiter
+    AACRC_BASIS, AACRC_FEATURES = args.aacrc_basis, args.aacrc_features
+    AACRC_RIDGE_INTERCEPT = bool(args.aacrc_ridge_intercept)
+    RECIRC_OOB_CONTEXT = bool(args.recirc_oob_context)
+    RF_TREES, RF_DEPTH, RF_MIN_LEAF = args.rf_trees, args.rf_depth, args.rf_min_leaf
     data = load_insurance(str(args.data_file))
     if int(FRAC_C * data.n) <= 1.0 / alpha:
         raise ValueError("Insurance precisa de len(C) > 1/alpha para ajustar AA-CRC.")
@@ -1175,19 +1415,30 @@ def main():
         warnings.warn("Gráficos omitidos porque há larguras infinitas; consulte os CSVs.")
 
     meta = {
-        "experiment": "experiment_6_insurance_official_aacrc2_truncated",
+        "experiment": "experiment_6_insurance_official_aacrc_rf_leaves",
         "aacrc": {
             "source_commit": AACRC_COMMIT, "source_sha256": AACRC_SOURCE_SHA256,
             "repository": str(args.aacrc_repo.resolve()), "objective": "authors J/J_prime",
             "integration": args.aacrc_integration, "quadrature_nodes": 100,
             "optimizer": "SLSQP", "ridge": AACRC_RIDGE, "maxiter": AACRC_MAXITER,
-            "fit_split": "C", "feature_standardization_split": "D",
+            "fit_split": "C", "basis": AACRC_BASIS, "covariates": AACRC_FEATURES,
             "sample_correction": "1/len(C)", "auxiliary_labels_per_observation": 5,
-            "threshold_class": "affine u on standardized original one-hot covariates",
+            "threshold_class": "u(x) = Phi(x) @ theta",
             "fit_interval_multiplier": "max(0, -log(u)) if u > 0 else infinity",
-            "interval_multiplier": "min(LAM_MAX, max(0, -log(u))) if u > 0 else LAM_MAX",
-            "deployment": {"truncate": True, "lam_max": float(LAM_MAX), "snap_to_grid": False},
-            "theory_note": "original objective with postfit interval truncation; truncation can increase risk; no additional validity claim",
+            "linear_arm": {
+                "feature_map": "intercept + covariates standardized with D statistics",
+                "ridge": AACRC_RIDGE, "ridge_on_intercept": AACRC_RIDGE_INTERCEPT,
+                "interval_multiplier": "min(LAM_MAX, max(0, -log(u))) if u > 0 else LAM_MAX",
+                "deployment": {"truncate": True, "lam_max": float(LAM_MAX), "snap_to_grid": False},
+            },
+            "rf_arm": {
+                "feature_map": "one-hot RF leaf indicators (Blot et al., Algorithm 1)",
+                "rf_fit_split": "D",
+                "rf_target": "log1p(minimal covering multiplier), OOB QRF quantiles",
+                "n_trees": RF_TREES, "max_depth": RF_DEPTH, "min_samples_leaf": RF_MIN_LEAF,
+                "ridge": 0.0, "bounds": "theta_j in [exp(-LAM_MAX)/T, 1/T] (no truncation needed)",
+            },
+            "theory_note": "task adaptation of the authors' objective; truncation (linear arm) can increase risk; no additional validity claim",
             "lambda_grid_applies": False,
         },
         "data_file": str(args.data_file.resolve()),
@@ -1196,6 +1447,7 @@ def main():
         "seed": int(base_seed),
         "risk_model": str(risk_model) if use_recirc else None,
         "recirc_enabled": bool(use_recirc),
+        "recirc_oob_context": RECIRC_OOB_CONTEXT,
         "tabicl_device": str(TABICL_DEVICE),
         "n_obs": int(data.n),
         "n_features": int(data.p),

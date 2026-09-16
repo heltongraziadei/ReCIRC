@@ -2,8 +2,25 @@
 
 """Synthetic heteroscedastic experiment runner.
 
-Generates heteroscedastic synthetic data, compares CRC/AA-CRC/ReCIRC
-approaches and saves results and plots.
+Generates heteroscedastic synthetic data, compares CRC / AA-CRC / ReCIRC and
+saves results and plots.
+
+AA-CRC arms (chosen with --aacrc-basis):
+
+* ``aacrc_rf``   -- feature map of Blot et al. (2025, Sec. 3, Algorithm 1) for
+  tabular regression: a random forest is trained on the absolute residuals of
+  the context split D, and Phi(x) is the one-hot vector of the leaves reached
+  by x (one group per leaf). theta is fitted on the calibration split C only,
+  without ridge and with box bounds, as in the authors' tabular notebook
+  (notebooks/cqr_example.ipynb, commit 64504c0).
+* ``aacrc_poly`` -- previous polynomial basis {1, x, |x|, x^2}. By default it is
+  also fitted on C only (--aacrc-poly-split union restores D u C) and its ridge
+  penalty excludes the intercept (--poly-ridge-intercept restores the old
+  behaviour). By Theorem 1 of Blot et al., a ridge on the intercept lowers the
+  marginal level to alpha - 2*rho*theta_0.
+
+Both arms use the authors' objective J / J_prime (multiaccurate.py) and the
+pseudo-label reduction of the bounded excess loss (error <= 1/AACRC_N_PSEUDO).
 """
 
 # Install required packages automatically
@@ -46,8 +63,9 @@ import torch
 from pygam import LinearGAM, s
 from scipy import stats
 from scipy.optimize import minimize
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.isotonic import IsotonicRegression
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from tabicl import TabICLRegressor
 
 
@@ -86,19 +104,24 @@ AACRC_N_PSEUDO = 101
 AACRC_RIDGE = 1e-3
 AACRC_MAXITER = 300
 
-METHOD_ORDER = ["crc", "aacrc", "recirc", "oracle"]
+# Filled in main() according to --aacrc-basis.
+METHOD_ORDER = []
 METHOD_LABELS = {
     "crc": "Standard CRC",
-    "aacrc": "AA-CRC",
+    "aacrc_poly": "AA-CRC (poly)",
+    "aacrc_rf": "AA-CRC (RF leaves)",
     "recirc": "ReCIRC TabICL",
     "oracle": "Oracle Rectified",
 }
 METHOD_COLORS = {
     "crc": "#999999",
-    "aacrc": "#009E73",
+    "aacrc_poly": "#009E73",
+    "aacrc_rf": "#CC79A7",
     "recirc": "#002F6C",
     "oracle": "#D55E00",
 }
+
+SIGMA_SCENARIO = "abs"
 
 
 def parse_args():
@@ -114,6 +137,17 @@ def parse_args():
     parser.add_argument("--a-points", type=int, default=101)
     parser.add_argument("--lambda-max", type=float, default=4.0)
     parser.add_argument("--k-aug", type=int, default=15)
+    parser.add_argument("--sigma", choices=["abs", "sin"], default="abs",
+                        help="abs: 0.2 + 0.6|x|; sin: 0.2 + 0.6|sin(2x)|.")
+    # AA-CRC
+    parser.add_argument("--aacrc-basis", choices=["poly", "rf", "both"], default="both")
+    parser.add_argument("--aacrc-poly-split", choices=["cal", "union"], default="cal",
+                        help="Split used to fit theta in the polynomial arm (C or D u C).")
+    parser.add_argument("--poly-ridge-intercept", action="store_true",
+                        help="Penalize the intercept in the polynomial arm (old behaviour).")
+    parser.add_argument("--rf-trees", type=int, default=3)
+    parser.add_argument("--rf-depth", type=int, default=4)
+    parser.add_argument("--rf-min-leaf", type=int, default=100)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument(
         "--output-dir",
@@ -129,6 +163,8 @@ def mu_true(x):
 
 
 def sigma_true(x):
+    if SIGMA_SCENARIO == "sin":
+        return 0.2 + 0.6 * np.abs(np.sin(2 * x))
     return 0.2 + 0.6 * np.abs(x)
 
 
@@ -223,12 +259,17 @@ def calibrate_rectified(residual_cal, risk_cal, lambda_grid, a_grid, alpha):
     return float(a_grid[valid[-1]]) if len(valid) else float(a_grid[0])
 
 
-def aacrc_features(x):
-    x = np.asarray(x, dtype=float)
-    return np.column_stack([x, np.abs(x), x**2])
+# -----------------------------------------------------------------------------
+# AA-CRC: shared pieces
+# -----------------------------------------------------------------------------
 
 
 def pseudo_labels(residual, lambda_max):
+    """Bounded excess loss as the FNR over AACRC_N_PSEUDO positive pseudo-pixels.
+
+    With u = Phi(x)^T theta and lambda = lambda_max - u, a pseudo-pixel is missed
+    iff lambda_max - r + offset < u, i.e. offset < r - lambda.
+    """
     offsets = (np.arange(AACRC_N_PSEUDO) + 0.5) * EXCESS_SCALE / AACRC_N_PSEUDO
     labels = [np.ones((AACRC_N_PSEUDO, 1), dtype=float) for _ in residual]
     scores = [(lambda_max - value + offsets)[:, None] for value in residual]
@@ -248,26 +289,22 @@ def validate_pseudo_reduction(lambda_max):
     return float(error.max()), float(error.mean())
 
 
-def fit_aacrc(x, residual, lambda_grid, alpha):
-    features = aacrc_features(x)
-    scaler = StandardScaler().fit(features)
-    phi = scaler.transform(features)
-    phi = np.column_stack([np.ones(len(phi)), phi]).astype(float)
-    labels, scores = pseudo_labels(residual, float(lambda_grid[-1]))
-    losses = bounded_excess_loss(residual[:, None], lambda_grid[None, :])
-    lambda_init = crc_select(losses, lambda_grid, alpha)
-    theta = np.zeros(phi.shape[1])
-    theta[0] = max(1e-6, float(lambda_grid[-1]) - lambda_init)
+def threshold_to_lambda(u, lambda_max, lambda_grid):
+    return np.clip(lambda_max - np.maximum(0.0, u), lambda_grid[0], lambda_grid[-1])
+
+
+def run_slsqp(objective, gradient, theta, args, bounds=None, name="AA-CRC"):
     attempts = []
     start = time.time()
-    result = None
+    result, valid = None, False
     for maxiter in (AACRC_MAXITER, 3 * AACRC_MAXITER):
         result = minimize(
-            J,
+            objective,
             theta,
             method="SLSQP",
-            args=(labels, scores, phi, alpha, len(residual), "ridge", AACRC_RIDGE),
-            jac=J_prime,
+            args=args,
+            jac=gradient,
+            bounds=bounds,
             options={"maxiter": maxiter, "disp": False},
             tol=1e-8,
         )
@@ -278,22 +315,150 @@ def fit_aacrc(x, residual, lambda_grid, alpha):
         if np.all(np.isfinite(result.x)):
             theta = result.x.copy()
     if result is None or not valid:
-        raise RuntimeError("AA-CRC falhou: " + " | ".join(attempts))
+        raise RuntimeError(f"{name} falhou: " + " | ".join(attempts))
+    return result, time.time() - start, len(attempts)
+
+
+# -----------------------------------------------------------------------------
+# AA-CRC with the polynomial basis
+# -----------------------------------------------------------------------------
+
+
+def aacrc_features(x):
+    x = np.asarray(x, dtype=float)
+    return np.column_stack([x, np.abs(x), x**2])
+
+
+def J_ridge_free_intercept(theta, labels, scores, phi, alpha, n, rho):
+    return J(theta, labels, scores, phi, alpha, n) + rho * np.sum(theta[1:] ** 2)
+
+
+def J_prime_ridge_free_intercept(theta, labels, scores, phi, alpha, n, rho):
+    grad = np.asarray(J_prime(theta, labels, scores, phi, alpha, n), dtype=float).copy()
+    grad[1:] += 2.0 * rho * theta[1:]
+    return grad
+
+
+def fit_aacrc_poly(x, residual, lambda_grid, alpha, ridge_intercept=False):
+    features = aacrc_features(x)
+    scaler = StandardScaler().fit(features)
+    phi = scaler.transform(features)
+    phi = np.column_stack([np.ones(len(phi)), phi]).astype(float)
+    lambda_max = float(lambda_grid[-1])
+    labels, scores = pseudo_labels(residual, lambda_max)
+    losses = bounded_excess_loss(residual[:, None], lambda_grid[None, :])
+    lambda_init = crc_select(losses, lambda_grid, alpha)
+    theta = np.zeros(phi.shape[1])
+    theta[0] = max(1e-6, lambda_max - lambda_init)
+    n = len(residual)
+    if ridge_intercept:
+        objective, gradient = J, J_prime
+        args = (labels, scores, phi, alpha, n, "ridge", AACRC_RIDGE)
+    else:
+        objective, gradient = J_ridge_free_intercept, J_prime_ridge_free_intercept
+        args = (labels, scores, phi, alpha, n, AACRC_RIDGE)
+    result, elapsed, attempts = run_slsqp(objective, gradient, theta, args, name="AA-CRC (poly)")
+    fit_lambda = threshold_to_lambda(phi @ result.x, lambda_max, lambda_grid)
     return {
         "theta": result.x,
         "scaler": scaler,
-        "lambda_max": float(lambda_grid[-1]),
-        "time": time.time() - start,
+        "lambda_max": lambda_max,
+        "time": elapsed,
         "objective": float(result.fun),
-        "attempts": len(attempts),
+        "attempts": attempts,
+        "fit_risk": float(bounded_excess_loss(residual, fit_lambda).mean()),
+        "n_params": int(phi.shape[1]),
     }
 
 
-def predict_aacrc(fit, x, lambda_grid):
+def predict_aacrc_poly(fit, x, lambda_grid):
     phi = fit["scaler"].transform(aacrc_features(x))
     phi = np.column_stack([np.ones(len(phi)), phi])
-    threshold = np.maximum(0.0, phi @ fit["theta"])
-    return np.clip(fit["lambda_max"] - threshold, lambda_grid[0], lambda_grid[-1])
+    return threshold_to_lambda(phi @ fit["theta"], fit["lambda_max"], lambda_grid)
+
+
+# -----------------------------------------------------------------------------
+# AA-CRC with random-forest leaf indicators (Blot et al., Algorithm 1)
+# -----------------------------------------------------------------------------
+
+
+def _one_hot_encoder():
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:  # scikit-learn < 1.2
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+
+class LeafMap:
+    """Phi(x) = one-hot indicators of the leaves reached by x in each tree."""
+
+    def __init__(self, x_res, r_res, n_trees, max_depth, min_leaf, seed):
+        X = np.asarray(x_res, dtype=float).reshape(-1, 1)
+        self.rf = RandomForestRegressor(
+            n_estimators=n_trees,
+            max_depth=max_depth,
+            min_samples_leaf=min_leaf,
+            random_state=seed,
+        ).fit(X, r_res)
+        self.encoder = _one_hot_encoder().fit(self.rf.apply(X))
+        self.n_trees = n_trees
+
+    def __call__(self, x):
+        X = np.asarray(x, dtype=float).reshape(-1, 1)
+        return self.encoder.transform(self.rf.apply(X)).astype(float)
+
+    @property
+    def n_leaves(self):
+        return int(sum(len(c) for c in self.encoder.categories_))
+
+
+def fit_aacrc_rf(x, residual, lambda_grid, alpha, leaf_map):
+    """theta on C, no ridge, box bounds -- as in the authors' tabular notebook.
+
+    Leaf indicators of each tree sum to one, so no separate intercept is added.
+    """
+    phi = leaf_map(x)
+    lambda_max = float(lambda_grid[-1])
+    labels, scores = pseudo_labels(residual, lambda_max)
+    losses = bounded_excess_loss(residual[:, None], lambda_grid[None, :])
+    lambda_init = crc_select(losses, lambda_grid, alpha)
+    theta = np.full(phi.shape[1], max(1e-6, lambda_max - lambda_init) / leaf_map.n_trees)
+    n = len(residual)
+    bounds = [(0.0, lambda_max)] * phi.shape[1]
+    result, elapsed, attempts = run_slsqp(
+        J, J_prime, theta, (labels, scores, phi, alpha, n, None, None),
+        bounds=bounds, name="AA-CRC (RF leaves)",
+    )
+    fit_lambda = threshold_to_lambda(phi @ result.x, lambda_max, lambda_grid)
+    fit_loss = bounded_excess_loss(residual, fit_lambda)
+    # Multiaccuracy check on C: risk inside each leaf (group) with >= 20 points.
+    counts = phi.sum(axis=0)
+    leaf_risk = (phi * fit_loss[:, None]).sum(axis=0) / np.maximum(counts, 1.0)
+    populated = counts >= 20
+    return {
+        "theta": result.x,
+        "leaf_map": leaf_map,
+        "lambda_max": lambda_max,
+        "time": elapsed,
+        "objective": float(result.fun),
+        "attempts": attempts,
+        "fit_risk": float(fit_loss.mean()),
+        "n_params": int(phi.shape[1]),
+        "fit_worst_leaf_risk": float(leaf_risk[populated].max()) if populated.any() else float("nan"),
+        "rate_theta_at_bound": float(np.mean(
+            np.isclose(result.x, 0.0) | np.isclose(result.x, lambda_max)
+        )),
+    }
+
+
+def predict_aacrc_rf(fit, x, lambda_grid):
+    u = fit["leaf_map"](x) @ fit["theta"]
+    return threshold_to_lambda(u, fit["lambda_max"], lambda_grid)
+
+
+# -----------------------------------------------------------------------------
+# Evaluation and trial loop
+# -----------------------------------------------------------------------------
 
 
 def evaluate(loss, width, lam, sigma, alpha, method, lambda_grid, n_bins=5):
@@ -315,13 +480,7 @@ def evaluate(loss, width, lam, sigma, alpha, method, lambda_grid, n_bins=5):
     return row, bin_risk
 
 
-try:
-    from .risk_calibration import RiskCalibration, bin_groups
-except ImportError:
-    from risk_calibration import RiskCalibration, bin_groups
-
-
-def run_trial(args, seed, device, diagnostic=None):
+def run_trial(args, seed, device):
     rng = np.random.default_rng(seed)
     lambda_grid = np.linspace(0.0, args.lambda_max, args.lambda_points)
     a_grid = np.linspace(0.0, 1.0, args.a_points)
@@ -337,17 +496,39 @@ def run_trial(args, seed, device, diagnostic=None):
     residual_context = np.abs(context["y"].to_numpy() - mu_context)
     residual_cal = np.abs(cal["y"].to_numpy() - mu_cal)
     residual_test = np.abs(test["y"].to_numpy() - mu_test)
+    x_context, x_cal, x_test = (d["x"].to_numpy() for d in (context, cal, test))
 
-    fit_residual = np.concatenate([residual_context, residual_cal])
-    fit_x = np.concatenate([context["x"].to_numpy(), cal["x"].to_numpy()])
-    crc_losses = bounded_excess_loss(fit_residual[:, None], lambda_grid[None, :])
+    union_residual = np.concatenate([residual_context, residual_cal])
+    union_x = np.concatenate([x_context, x_cal])
+    crc_losses = bounded_excess_loss(union_residual[:, None], lambda_grid[None, :])
     lambda_crc = crc_select(crc_losses, lambda_grid, args.alpha)
 
-    aacrc_fit = fit_aacrc(fit_x, fit_residual, lambda_grid, args.alpha)
-    lambda_aacrc = predict_aacrc(aacrc_fit, test["x"], lambda_grid)
+    lambdas = {"crc": np.full(args.n_test, lambda_crc)}
+    diagnostics = {"lambda_crc": lambda_crc}
 
-    risk_oracle_cal = oracle_risk_matrix(cal["x"].to_numpy(), lambda_grid, mean_model)
-    risk_oracle_test = oracle_risk_matrix(test["x"].to_numpy(), lambda_grid, mean_model)
+    if args.aacrc_basis in ("poly", "both"):
+        if args.aacrc_poly_split == "union":
+            px, pr = union_x, union_residual
+        else:
+            px, pr = x_cal, residual_cal
+        fit_poly = fit_aacrc_poly(px, pr, lambda_grid, args.alpha,
+                                  ridge_intercept=args.poly_ridge_intercept)
+        lambdas["aacrc_poly"] = predict_aacrc_poly(fit_poly, x_test, lambda_grid)
+        diagnostics.update({f"aacrc_poly_{k}": v for k, v in fit_poly.items()
+                            if k not in ("theta", "scaler")})
+
+    if args.aacrc_basis in ("rf", "both"):
+        # RF on D (as D_res in Algorithm 1); theta on C only.
+        leaf_map = LeafMap(x_context, residual_context, args.rf_trees,
+                           args.rf_depth, args.rf_min_leaf, seed)
+        fit_rf = fit_aacrc_rf(x_cal, residual_cal, lambda_grid, args.alpha, leaf_map)
+        lambdas["aacrc_rf"] = predict_aacrc_rf(fit_rf, x_test, lambda_grid)
+        diagnostics.update({f"aacrc_rf_{k}": v for k, v in fit_rf.items()
+                            if k not in ("theta", "leaf_map")})
+        diagnostics["aacrc_rf_n_leaves"] = leaf_map.n_leaves
+
+    risk_oracle_cal = oracle_risk_matrix(x_cal, lambda_grid, mean_model)
+    risk_oracle_test = oracle_risk_matrix(x_test, lambda_grid, mean_model)
     a_oracle = calibrate_rectified(
         residual_cal, risk_oracle_cal, lambda_grid, a_grid, args.alpha
     )
@@ -356,23 +537,22 @@ def run_trial(args, seed, device, diagnostic=None):
     tabicl = fit_tabicl_surface(
         context, mu_context, args.k_aug, args.lambda_max, device, rng
     )
-    risk_recirc_cal = estimate_tabicl_risk(tabicl, cal["x"].to_numpy(), lambda_grid)
-    risk_recirc_test = estimate_tabicl_risk(tabicl, test["x"].to_numpy(), lambda_grid)
+    risk_recirc_cal = estimate_tabicl_risk(tabicl, x_cal, lambda_grid)
+    risk_recirc_test = estimate_tabicl_risk(tabicl, x_test, lambda_grid)
     a_recirc = calibrate_rectified(
         residual_cal, risk_recirc_cal, lambda_grid, a_grid, args.alpha
     )
     lambda_recirc = invert_risk_matrix(risk_recirc_test, lambda_grid, a_recirc)
 
-    lambdas = {
-        "crc": np.full(args.n_test, lambda_crc),
-        "aacrc": lambda_aacrc,
-        "recirc": lambda_recirc,
-        "oracle": lambda_oracle,
-    }
+    lambdas["recirc"] = lambda_recirc
+    lambdas["oracle"] = lambda_oracle
+    diagnostics.update({"a_recirc": a_recirc, "a_oracle": a_oracle})
+
     rows = []
     bin_rows = []
     widths = {}
-    for method, lam in lambdas.items():
+    for method in METHOD_ORDER:
+        lam = lambdas[method]
         loss = bounded_excess_loss(residual_test, lam)
         width = 2.0 * lam
         row, bin_risk = evaluate(
@@ -385,28 +565,11 @@ def run_trial(args, seed, device, diagnostic=None):
             lambda_grid,
         )
         rows.append(row)
-        widths[method] = {"x": test["x"].to_numpy(), "width": width}
+        widths[method] = {"x": x_test, "width": width}
         bin_rows.extend(
             {"method": method, "bin": group + 1, "risk": value}
             for group, value in enumerate(bin_risk)
         )
-    if diagnostic is not None:
-        sigma = test["sigma"].to_numpy()
-        edges = np.quantile(sigma, np.linspace(0, 1, 6))
-        bins = np.searchsorted(edges[1:-1], sigma, side="right")
-        losses_by_budget = np.column_stack([
-            bounded_excess_loss(residual_test, invert_risk_matrix(risk_recirc_test, lambda_grid, a))
-            for a in a_grid])
-        groups = bin_groups(bins, 5)
-        diagnostic.add_trial(a_grid, losses_by_budget, groups, seed=seed, a_hat=a_recirc)
-    diagnostics = {
-        "lambda_crc": lambda_crc,
-        "a_recirc": a_recirc,
-        "a_oracle": a_oracle,
-        "aacrc_time": aacrc_fit["time"],
-        "aacrc_attempts": aacrc_fit["attempts"],
-        "aacrc_objective": aacrc_fit["objective"],
-    }
     return pd.DataFrame(rows), pd.DataFrame(bin_rows), widths, diagnostics
 
 
@@ -421,6 +584,27 @@ def summarize(data, metrics):
     summary["ci95_low"] = summary["mean"] - 1.96 * summary["se"]
     summary["ci95_high"] = summary["mean"] + 1.96 * summary["se"]
     return summary
+
+
+def paired_differences(results, metrics, reference="recirc"):
+    """Paired differences (method - reference) across trials, with 95% CI."""
+    rows = []
+    wide = results.pivot(index="trial", columns="method")
+    for metric in metrics:
+        for method in METHOD_ORDER:
+            if method == reference:
+                continue
+            d = (wide[(metric, method)] - wide[(metric, reference)]).to_numpy()
+            se = d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else np.nan
+            rows.append({
+                "metric": metric,
+                "comparison": f"{method} - {reference}",
+                "mean_diff": d.mean(),
+                "se": se,
+                "ci95_low": d.mean() - 1.96 * se,
+                "ci95_high": d.mean() + 1.96 * se,
+            })
+    return pd.DataFrame(rows)
 
 
 def plot_results(results, bin_results, output_dir, alpha):
@@ -471,7 +655,16 @@ def package_version(name):
 
 
 def main():
+    global SIGMA_SCENARIO, METHOD_ORDER
     args = parse_args()
+    SIGMA_SCENARIO = args.sigma
+    METHOD_ORDER = ["crc"]
+    if args.aacrc_basis in ("poly", "both"):
+        METHOD_ORDER.append("aacrc_poly")
+    if args.aacrc_basis in ("rf", "both"):
+        METHOD_ORDER.append("aacrc_rf")
+    METHOD_ORDER += ["recirc", "oracle"]
+
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA solicitada, mas não está disponível.")
     device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
@@ -481,7 +674,6 @@ def main():
 
     max_error, mean_error = validate_pseudo_reduction(args.lambda_max)
     print(f"AA-CRC pseudo-label: max_error={max_error:.6f}, mean_error={mean_error:.6f}")
-    risk_diagnostic = RiskCalibration()
     all_metrics = []
     all_bins = []
     diagnostics = []
@@ -489,7 +681,7 @@ def main():
     for trial in range(args.trials):
         seed = args.seed + trial + 1
         trial_start = time.time()
-        metrics, bins, _, diag = run_trial(args, seed, device, diagnostic=risk_diagnostic)
+        metrics, bins, _, diag = run_trial(args, seed, device)
         metrics["trial"] = trial
         metrics["seed"] = seed
         bins["trial"] = trial
@@ -502,7 +694,6 @@ def main():
         print(f"\nTrial {trial + 1}/{args.trials} ({time.time() - trial_start:.1f}s)")
         print(compact.round(4).to_string(index=False))
 
-    risk_diagnostic.save(args.output_dir, make_plot=not args.no_plots)
     results = pd.concat(all_metrics, ignore_index=True)
     bin_results = pd.concat(all_bins, ignore_index=True)
     diagnostics_df = pd.DataFrame(diagnostics)
@@ -517,14 +708,23 @@ def main():
         "lambda_max_rate",
     ]
     summary = summarize(results, metric_names)
+    paired = paired_differences(results, ["risk", "worst_bin_risk", "mean_bin_excess", "mean_width"])
     results.to_csv(args.output_dir / "per_replication_metrics.csv", index=False)
     bin_results.to_csv(args.output_dir / "per_replication_bin_risks.csv", index=False)
     diagnostics_df.to_csv(args.output_dir / "per_replication_diagnostics.csv", index=False)
     summary.to_csv(args.output_dir / "summary_metrics.csv", index=False)
+    paired.to_csv(args.output_dir / "paired_differences.csv", index=False)
 
     metadata = {
         "experiment": "synthetic_heteroscedastic_regression",
-        "protocol": "fair_labeled_budget_D_union_C",
+        "sigma_scenario": args.sigma,
+        "protocol": {
+            "crc": "D u C",
+            "aacrc_poly": f"theta on {'D u C' if args.aacrc_poly_split == 'union' else 'C'}; "
+                          f"ridge={AACRC_RIDGE} {'with' if args.poly_ridge_intercept else 'without'} intercept",
+            "aacrc_rf": "RF (Blot et al. Alg. 1) on |residuals| of D; theta on C; no ridge; bounds [0, lambda_max]",
+            "recirc": "risk surface on D; budget on C",
+        },
         "arguments": {**vars(args), "output_dir": str(args.output_dir), "device_resolved": device},
         "aacrc_commit": AACRC_COMMIT,
         "package_versions": {
@@ -539,6 +739,8 @@ def main():
 
     print("\nSummary")
     print(summary.round(4).to_string(index=False))
+    print("\nPaired differences (method - recirc)")
+    print(paired.round(4).to_string(index=False))
     print(f"\nTempo total: {time.time() - start:.1f}s")
     print(f"Resultados: {args.output_dir.resolve()}")
 
