@@ -9,7 +9,8 @@ Base model: One-vs-Rest logistic regression on RCV1 TF-IDF — out-of-sample sco
 no GPU or transformer required. The conformal guarantee is model-agnostic.
 
 Difficulty score is label-free (entropy of scores) for binning; fair budget
-(FAIR_BUDGET) used; B=1, alpha=0.10; documents with sum_k y_k == 0 are dropped.
+(FAIR_BUDGET) used for global CRC only; AA-CRC standardizes on D and fits
+theta on C with an intercept-free ridge; B=1, alpha=0.10; documents with sum_k y_k == 0 are dropped.
 
 By default the script runs a synthetic surrogate (cardinality ~3, heterogeneous
 difficulty) to validate the end-to-end pipeline. Set USE_SYNTHETIC=False to
@@ -63,23 +64,46 @@ def sh(c):
     return os.system(c)
 
 
-if not os.path.exists("AA-CRC"):
-    sh("git clone -q https://github.com/vincentblot28/AA-CRC.git")
+AACRC_COMMIT = "64504c011ac2db910e258037e48170a63381b5e6"
+AACRC_SOURCE_SHA256 = "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315"
 
-sys.path.insert(0, "AA-CRC")
+# --aacrc-repo is read here, before the import, because J/J_prime are loaded
+# at module level. The full parser in parse_args() accepts the same flag.
+_pre_parser = argparse.ArgumentParser(add_help=False)
+_pre_parser.add_argument("--aacrc-repo", type=Path, default=None)
+_pre_args, _ = _pre_parser.parse_known_args()
+
+if _pre_args.aacrc_repo is not None:
+    AACRC_REPO = _pre_args.aacrc_repo.resolve()
+else:
+    AACRC_REPO = Path("AA-CRC").resolve()
+    if not AACRC_REPO.exists():
+        sh(f"git clone -q https://github.com/vincentblot28/AA-CRC.git {AACRC_REPO}")
+        sh(f"git -C {AACRC_REPO} checkout -q {AACRC_COMMIT}")
+
+_aacrc_source = AACRC_REPO / "multiaccurate_cp" / "utils" / "multiaccurate.py"
+if not _aacrc_source.is_file():
+    raise FileNotFoundError(
+        f"AA-CRC source missing: {_aacrc_source}. Clone vincentblot28/AA-CRC, "
+        f"checkout {AACRC_COMMIT}, and pass --aacrc-repo PATH."
+    )
+import hashlib
+_digest = hashlib.sha256(_aacrc_source.read_bytes()).hexdigest()
+if _digest != AACRC_SOURCE_SHA256:
+    raise RuntimeError(
+        f"Unexpected AA-CRC source SHA-256: {_digest}; expected {AACRC_SOURCE_SHA256} "
+        f"(commit {AACRC_COMMIT})."
+    )
+sys.path.insert(0, str(AACRC_REPO))
 
 try:
     from tabicl import TabICLRegressor  # noqa
 except Exception:
     sh(f"{sys.executable} -m pip install -q tabicl")
 
-# Importar AA-CRC oficial
-try:
-    from multiaccurate_cp.utils.multiaccurate import J, J_prime
-    HAS_AACRC = True
-except Exception as e:
-    HAS_AACRC = False
-    print(f"AA-CRC indisponível ({e}).")
+# Importar AA-CRC oficial (falha explícita: o experimento não roda sem o baseline)
+from multiaccurate_cp.utils.multiaccurate import J, J_prime
+HAS_AACRC = True
 
 try:
     from sklearn.ensemble import HistGradientBoostingRegressor
@@ -114,7 +138,7 @@ N_BINS = 10
 DIFFICULTY_KIND = "entropy"
 
 LAMBDA_GRID = np.linspace(0.0, 1.0, 26)
-A_GRID = np.linspace(0.0, 1, 101)
+A_GRID = np.linspace(0.0, 0.5, 101)
 
 LAMBDA_GRID_CRC = np.unique(np.concatenate([
     np.linspace(0.0, 0.25, 251),
@@ -376,45 +400,65 @@ def choose_lambda_crc(scores, gt, alpha, lambda_grid, B=1.0):
 
 
 def run_aacrc(
-    cal_scores, cal_labels, test_scores, alpha, lambda_ridge=0.01,
-    include_full_scores=True, seed=0
+    D_scores, cal_scores, cal_labels, test_scores, alpha, lambda_ridge=0.01,
+    include_full_scores=True, seed=0, maxiter=1000
 ):
-    """Roda AA-CRC com J/J_prime oficiais."""
+    """AA-CRC with the authors' J/J_prime (pinned commit).
+
+    Same protocol as the other experiments: features standardized with D
+    statistics; theta fitted on the calibration split C only; the ridge
+    penalty excludes the intercept, so by Theorem 1 of Blot et al. the
+    marginal level is not shifted by -2*rho*theta_0.
+    """
     if not HAS_AACRC:
         return None
 
-    n = cal_scores.shape[0]
     feat = lambda s: make_features(s, include_full_scores=include_full_scores).values
-    scaler = StandardScaler().fit(feat(cal_scores))
-    Phi_cal = scaler.transform(feat(cal_scores))
-    Phi_test = scaler.transform(feat(test_scores))
+    scaler = StandardScaler().fit(feat(D_scores))
+    Phi_cal_b = np.column_stack(
+        [np.ones(len(cal_scores)), scaler.transform(feat(cal_scores))]
+    ).astype(np.float64)
+    Phi_test_b = np.column_stack(
+        [np.ones(len(test_scores)), scaler.transform(feat(test_scores))]
+    ).astype(np.float64)
 
-    Phi_cal_b = np.concatenate([np.ones((len(Phi_cal), 1)), Phi_cal], 1).astype(np.float64)
-    Phi_test_b = np.concatenate([np.ones((len(Phi_test), 1)), Phi_test], 1).astype(np.float64)
-
-    D = Phi_cal_b.shape[1]
+    n, D = Phi_cal_b.shape
     Y_aa = cal_labels[:, :, None].astype(np.float64)
     P_aa = cal_scores[:, :, None].astype(np.float64)
 
-    theta0 = np.zeros(D)
-    theta0[0] = 0.5
+    mask = np.ones(D, dtype=np.float64)
+    mask[0] = 0.0  # intercept not penalized
+
+    def objective(theta):
+        value = J(theta, Y_aa, P_aa, Phi_cal_b, alpha, n, None, None)
+        return float(value + lambda_ridge * np.sum(mask * theta ** 2))
+
+    def gradient(theta):
+        grad = np.asarray(J_prime(theta, Y_aa, P_aa, Phi_cal_b, alpha, n, None, None), dtype=np.float64)
+        return grad + 2.0 * lambda_ridge * mask * theta
+
+    theta = np.zeros(D)
+    theta[0] = 0.5
 
     t0 = time.time()
-    res = minimize(
-        J,
-        x0=theta0,
-        method="SLSQP",
-        args=(Y_aa, P_aa, Phi_cal_b, alpha, n, "ridge", lambda_ridge),
-        jac=J_prime,
-        options={"maxiter": 200, "disp": False},
-        tol=1e-6,
-    )
+    res, messages = None, []
+    for iterations in (maxiter, 3 * maxiter):
+        res = minimize(objective, theta, method="SLSQP", jac=gradient,
+                       options={"maxiter": iterations, "disp": False}, tol=1e-10)
+        messages.append(str(res.message))
+        if res.success and np.isfinite(res.x).all() and np.isfinite(res.fun):
+            break
+        if np.isfinite(res.x).all():
+            theta = res.x.copy()
+    else:
+        raise RuntimeError("AA-CRC falhou: " + " | ".join(messages))
     dt = time.time() - t0
 
     lam_test = np.clip(Phi_test_b @ res.x, 0.0, 1.0)
     pred = prediction_sets(test_scores, lam_test)
 
-    return {"pred": pred, "lambdas": lam_test, "theta": res.x, "time": dt}
+    return {"pred": pred, "lambdas": lam_test, "theta": res.x, "time": dt,
+            "attempts": len(messages)}
 
 
 # ============================================================================
@@ -436,25 +480,31 @@ def build_augmented(scores, gt, lambda_grid, include_full_scores=True):
 def fit_risk_model(X_aug, Z, device="cpu", seed=0):
     """Ajusta o modelo de risco (TabICL ou HistGradientBoosting)."""
     if HAS_TABICL:
-        kwargs = {"n_estimators": 4, "device": device, "random_state": seed}
-        batch_size = os.environ.get("RECIRC_TABICL_BATCH_SIZE")
-        if batch_size is not None:
-            kwargs["batch_size"] = int(batch_size)
-        m = TabICLRegressor(**kwargs)
+        m = TabICLRegressor(n_estimators=4, device=device, random_state=seed)
     else:
         m = HistGradientBoostingRegressor(max_iter=300, random_state=seed)
     m.fit(X_aug, Z)
     return m
 
 
+PREDICT_BATCH_ROWS = 40_000
+
+
 def predict_risk_matrix(model, scores, lambda_grid, include_full_scores=True, enforce_monotone=True):
-    """Prediz a matriz R(lambda|x)."""
-    base = make_features(scores, include_full_scores=include_full_scores).values
+    """Prediz a matriz R(lambda|x) em lotes, para limitar a memória do TabICL."""
+    base = make_features(scores, include_full_scores=include_full_scores).values.astype(np.float32)
     n, M = scores.shape[0], len(lambda_grid)
-    X = np.concatenate(
-        [np.repeat(base, M, 0), np.tile(lambda_grid, n).reshape(-1, 1)], 1
-    ).astype(np.float32)
-    R = np.clip(model.predict(X), 0, 1).reshape(n, M)
+    rows_per_obs = max(1, PREDICT_BATCH_ROWS // M)
+    lam_col = lambda_grid.astype(np.float32)
+    R = np.empty((n, M), dtype=np.float64)
+    for start in range(0, n, rows_per_obs):
+        stop = min(n, start + rows_per_obs)
+        m = stop - start
+        X = np.concatenate(
+            [np.repeat(base[start:stop], M, 0), np.tile(lam_col, m).reshape(-1, 1)], 1
+        )
+        R[start:stop] = np.clip(model.predict(X), 0, 1).reshape(m, M)
+        del X
 
     if enforce_monotone:
         R = np.maximum.accumulate(R, axis=1)
@@ -469,10 +519,15 @@ def invert_risk_curve(R, lambda_grid, a):
     return np.where(R[:, 0] > a, lambda_grid[0], lambdas)
 
 
-try:
-    from .risk_calibration import RiskCalibration, bin_groups
-except ImportError:
-    from risk_calibration import RiskCalibration, bin_groups
+def free_memory():
+    import gc
+    gc.collect()
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def run_recirc(
@@ -515,14 +570,17 @@ def run_recirc(
 
     lam_test = invert_risk_curve(R_test, lambda_grid, a_hat)
     pred = prediction_sets(test_scores, lam_test)
+    elapsed = time.time() - t0
+
+    del model, X_aug, Z, R_cal, R_test
+    free_memory()
 
     return {
         "pred": pred,
         "lambdas": lam_test,
         "a_hat": a_hat,
         "risks_cal": risks_cal,
-        "test_risk": R_test,
-        "time": time.time() - t0,
+        "time": elapsed,
     }
 
 
@@ -576,7 +634,7 @@ def run_single_split(sgmd, labels):
 
     # AA-CRC
     if USE_AACRC:
-        o = run_aacrc(calM_scores, calM_labels, test_scores, ALPHA, LAMBDA_RIDGE,
+        o = run_aacrc(D_scores, cal_scores, cal_labels, test_scores, ALPHA, LAMBDA_RIDGE,
                       INCLUDE_FULL_SCORES, seed=0)
         if o:
             results["AA-CRC"] = {**o, **evaluate_pred_set(o["pred"], test_labels)}
@@ -645,7 +703,7 @@ def conditional_by_bin(pred, gt, bins, n_bins, name):
     )
 
 
-def run_one_split_trial(scores, gt, seed, diagnostic=None):
+def run_one_split_trial(scores, gt, seed):
     """Executa um trial do experimento de múltiplos splits."""
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(scores))
@@ -669,7 +727,7 @@ def run_one_split_trial(scores, gt, seed, diagnostic=None):
 
     # AA-CRC
     if USE_AACRC:
-        o = run_aacrc(cMs, cMl, ts, ALPHA, LAMBDA_RIDGE, INCLUDE_FULL_SCORES, seed=seed)
+        o = run_aacrc(Ds, cs, cl, ts, ALPHA, LAMBDA_RIDGE, INCLUDE_FULL_SCORES, seed=seed)
         if o:
             preds["AA-CRC"] = o["pred"]
             lam_img["AA-CRC"] = o["lambdas"]
@@ -680,11 +738,6 @@ def run_one_split_trial(scores, gt, seed, diagnostic=None):
         Ds, Dl, cs, cl, ts, LAMBDA_GRID, A_GRID, ALPHA, INCLUDE_FULL_SCORES,
         n_d_tabicl=N_D_TABICL, device=DEVICE, seed=seed
     )
-    if diagnostic is not None:
-        losses_by_budget = np.column_stack([
-            per_image_fnr(prediction_sets(ts, invert_risk_curve(o["test_risk"], LAMBDA_GRID, a)), tl)
-            for a in A_GRID])
-        diagnostic.add_trial(A_GRID, losses_by_budget, bin_groups(tb, N_BINS), seed=seed, a_hat=o["a_hat"])
     preds[rk] = o["pred"]
     lam_img[rk] = o["lambdas"]
 
@@ -726,18 +779,37 @@ def run_one_split_trial(scores, gt, seed, diagnostic=None):
     return marg, cond, adapt
 
 
-def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, diagnostic=None):
-    """Executa múltiplos trials e agrega resultados."""
+def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=None):
+    """Executa múltiplos trials; cada trial é salvo em disco e pulado se já existir."""
     marg_list, cond_list, adapt_list = [], [], []
+    if checkpoint_dir is not None:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for t in tqdm(range(n_trials), desc="Trials"):
-        m, c, a = run_one_split_trial(sgmd, labels, BASE_SEED + t, diagnostic=diagnostic)
+        paths = None
+        if checkpoint_dir is not None:
+            paths = {k: checkpoint_dir / f"trial_{t:03d}_{k}.csv" for k in ("marg", "cond", "adapt")}
+            if paths["marg"].exists() and paths["cond"].exists():
+                m = pd.read_csv(paths["marg"])
+                c = pd.read_csv(paths["cond"])
+                a = pd.read_csv(paths["adapt"]) if paths["adapt"].exists() and paths["adapt"].stat().st_size > 1 else pd.DataFrame()
+                print(f"Trial {t}: carregado do checkpoint.")
+                marg_list.append(m); cond_list.append(c); adapt_list.append(a)
+                continue
+
+        m, c, a = run_one_split_trial(sgmd, labels, BASE_SEED + t)
         for d in (m, c, a):
             if len(d) > 0:
                 d["trial"] = t
+        if paths is not None:
+            m.to_csv(paths["marg"], index=False)
+            c.to_csv(paths["cond"], index=False)
+            a.to_csv(paths["adapt"], index=False)
         marg_list.append(m)
         cond_list.append(c)
         adapt_list.append(a)
+        free_memory()
 
     df_marginal = pd.concat(marg_list, ignore_index=True)
     df_conditional = pd.concat(cond_list, ignore_index=True)
@@ -897,6 +969,13 @@ def parse_args():
         default="auto",
         help="Dispositivo para TabICL: auto (CUDA se disponível), cpu, ou cuda.",
     )
+    parser.add_argument("--trials", type=int, default=N_TRIALS, help="Número de trials.")
+    parser.add_argument("--skip-single-split", action="store_true",
+                        help="Pula o split único de sanity check (economiza uma rodada completa).")
+    parser.add_argument("--predict-batch-rows", type=int, default=PREDICT_BATCH_ROWS,
+                        help="Linhas por chamada de predict do TabICL (reduza se faltar memória).")
+    parser.add_argument("--aacrc-repo", type=Path, default=None,
+                        help=f"Repositório AA-CRC no commit {AACRC_COMMIT[:7]} (lido antes do import).")
     return parser.parse_args()
 
 
@@ -906,8 +985,18 @@ def parse_args():
 
 
 def main(args=None):
+    global DEVICE, N_TRIALS, PREDICT_BATCH_ROWS
     if args is None:
         args = parse_args()
+    if args.trials < 1:
+        raise ValueError("--trials deve ser positivo.")
+    N_TRIALS = int(args.trials)
+    PREDICT_BATCH_ROWS = int(args.predict_batch_rows)
+    if args.device != "auto":
+        if args.device == "cuda" and DEVICE != "cuda":
+            raise RuntimeError("CUDA solicitada, mas não está disponível.")
+        DEVICE = args.device
+    print(f"Device: {DEVICE} | AA-CRC: {AACRC_REPO} | trials: {N_TRIALS}")
     print("=" * 80)
     print("Experimento 4: RCV1 (texto multilabel)")
     print("=" * 80)
@@ -918,15 +1007,28 @@ def main(args=None):
     sgmd, labels = load_data()
     print()
 
+    # Checkpoints ficam fora da pasta com timestamp, para permitir retomada
+    if args.output_dir is not None:
+        checkpoint_dir = Path(args.output_dir) / "checkpoints"
+    elif os.path.isdir("/content/drive"):
+        checkpoint_dir = Path("/content/drive/MyDrive/PythonReCIRC/results/experiment_4_rcv1_text_checkpoints")
+    else:
+        checkpoint_dir = Path(os.path.dirname(os.path.abspath(__file__))) / "results" / "experiment_4_rcv1_text_checkpoints"
+    print(f"Checkpoints: {checkpoint_dir}")
+
     # Split único com sanity check
-    print("Executando split único...")
-    results, test_bins, test_labels = run_single_split(sgmd, labels)
-    print()
+    test_bins, test_labels = None, None
+    if not args.skip_single_split:
+        print("Executando split único...")
+        results, test_bins, test_labels = run_single_split(sgmd, labels)
+        free_memory()
+        print()
 
     # Múltiplos trials
     print("Executando múltiplos trials...")
-    risk_diagnostic = RiskCalibration()
-    df_marginal, df_conditional, df_adapt = run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, diagnostic=risk_diagnostic)
+    df_marginal, df_conditional, df_adapt = run_multiple_trials(
+        sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=checkpoint_dir
+    )
     print()
 
     # Agregação
@@ -943,7 +1045,6 @@ def main(args=None):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         results_dir = os.path.join(base_dir, "results", f"experiment_4_rcv1_text_{timestamp}")
     Path(results_dir).mkdir(parents=True, exist_ok=True)
-    risk_diagnostic.save(results_dir)
     print(f"\nSalvando resultados em: {results_dir}")
 
     # Salvar DataFrames
@@ -967,6 +1068,8 @@ def main(args=None):
         "N_D": int(N_D),
         "N_CAL": int(N_CAL),
         "N_TRIALS": int(N_TRIALS),
+        "AACRC_COMMIT": AACRC_COMMIT,
+        "AACRC_PROTOCOL": "features standardized on D; theta on C; ridge on slopes only",
         "USE_SYNTHETIC": bool(USE_SYNTHETIC),
     }
     with open(os.path.join(results_dir, "meta.json"), "w") as f:
