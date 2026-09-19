@@ -112,9 +112,9 @@ The paper is in preparation. Until it is available, please cite this repository:
 ```bibtex
 @misc{recirc2026,
   title  = {{ReCIRC}: Rectified Conformal Risk Control},
-  author = {Graziadei, Helton and Resende, Bruno Marcondes and Ramos, Thiago Rodrigo and Izbicki, Rafael},
+  author = {Resende, Bruno Marcondes and Graziadei, Helton and Ramos, Thiago Rodrigo and Izbicki, Rafael},
   year   = {2026},
-  howpublished = {\url{https://github.com/<user>/ReCIRC}}
+  howpublished = {\url{https://github.com/heltongraziadei/ReCIRC}}
 }
 ```
 
