@@ -13,14 +13,14 @@
 
 ## The method
 
-Let $\{C_\lambda(x)\}_{\lambda\in\Lambda}$ be a nested family of prediction sets (larger $\lambda$ means a larger set) and $\ell(\lambda; x, y)\in[0,B]$ a loss that is non-increasing in $\lambda$, such as a false-negative rate or a weighted miscoverage. The data are split into three independent parts: a context set $\mathcal D$, a calibration set $\mathcal C$ of size $n$, and a test set.
+Let $\lbrace C_\lambda(x)\rbrace_{\lambda\in\Lambda}$ be a nested family of prediction sets (larger $\lambda$ means a larger set) and $\ell(\lambda; x, y)\in[0,B]$ a loss that is non-increasing in $\lambda$, such as a false-negative rate or a weighted miscoverage. The data are split into three independent parts: a context set $\mathcal D$, a calibration set $\mathcal C$ of size $n$, and a test set.
 
 1. **Risk surface (on $\mathcal D$).** Fit a regressor $\hat R(x,\lambda)\approx \mathbb E[\ell(\lambda;X,Y)\mid X=x]$. The default backend is the tabular foundation model [TabICL](https://github.com/soda-inria/tabicl); a gradient-boosting backend is available in some experiments. Predictions are clipped to $[0,B]$ and made monotone in $\lambda$.
 2. **Inversion at a budget.** For a budget $a$, set
-   $$\lambda_a(x)=\min\{\lambda\in\Lambda:\ \hat R(x,\lambda)\le a\},$$
+      $$\lambda_a(x)=\min\lbrace\lambda\in\Lambda:\ \hat R(x,\lambda)\le a\rbrace,$$
    falling back to the largest $\lambda$ when no grid point qualifies.
 3. **Rectification (on $\mathcal C$).** Choose the largest budget whose CRC bound stays below the target,
-      $$\hat a=\max\Bigl\lbrace a:\ \tfrac{n}{n+1}\,\hat L_{\mathcal C}(a)+\tfrac{B}{n+1}\le\alpha\Bigr\rbrace,\qquad \hat L_{\mathcal C}(a)=\tfrac1n\textstyle\sum_{i\in\mathcal C}\ell\big(\lambda_a(X_i);X_i,Y_i\big).$$
+     $$\hat a=\max\Bigl\lbrace a:\ \tfrac{n}{n+1}\,\hat L_{\mathcal C}(a)+\tfrac{B}{n+1}\le\alpha\Bigr\rbrace,\qquad \hat L_{\mathcal C}(a)=\tfrac1n\textstyle\sum_{i\in\mathcal C}\ell\big(\lambda_a(X_i);X_i,Y_i\big).$$
 4. **Deployment.** Return $C_{\lambda_{\hat a}(x)}(x)$ for each test input.
 
 Because $\hat R$ is fitted on $\mathcal D$ only, the map $a\mapsto\ell(\lambda_a(x);x,y)$ is non-decreasing for every $(x,y)$, so step 3 is ordinary CRC over a one-dimensional family and inherits its marginal guarantee $\mathbb E\big[\ell(\lambda_{\hat a}(X);X,Y)\big]\le\alpha$. The quality of $\hat R$ affects only how evenly the risk is distributed, never validity.
