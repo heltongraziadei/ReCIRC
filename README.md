@@ -2,10 +2,6 @@
   <img src="recirc-logo.svg" alt="ReCIRC — Rectified Conformal Risk Control" width="520">
 </p>
 
-<p align="center">
-  Conformal risk control whose guarantee is marginal, but whose risk is spread evenly across the input space.
-</p>
-
 ---
 
 **ReCIRC** (Rectified Conformal Risk Control) keeps the finite-sample marginal guarantee of conformal risk control (CRC) while adapting the decision parameter to each input. Global CRC picks a single threshold $\hat\lambda$ for every test point, so easy inputs end up far below the target risk $\alpha$ and hard inputs far above it. ReCIRC instead learns an estimate of the conditional risk $R(x,\lambda)$, inverts it at a common *risk budget* $a$ to obtain an input-specific $\lambda_a(x)$, and then calibrates the single scalar $a$ with CRC. The result is a risk profile that is close to flat at $\alpha$ whenever the risk model is informative, and a valid marginal guarantee regardless of how good the risk model is.
