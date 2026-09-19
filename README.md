@@ -60,7 +60,7 @@ All experiments compare global **CRC**, **AA-CRC** (Blot et al., AISTATS 2025) a
 A recent Python 3 with the scientific stack is enough; a CUDA GPU is strongly recommended because TabICL is slow on CPU.
 
 ```bash
-git clone https://github.com/<user>/ReCIRC.git
+git clone https://github.com/heltongraziadei/ReCIRC.git
 cd ReCIRC
 python -m venv .venv && source .venv/bin/activate
 pip install numpy pandas scipy scikit-learn matplotlib tqdm \
