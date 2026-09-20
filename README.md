@@ -7,7 +7,7 @@
 **ReCIRC** (Rectified Conformal Risk Control) keeps the finite-sample marginal guarantee of conformal risk control (CRC) while adapting the decision parameter to each input. Global CRC picks a single threshold $\hat\lambda$ for every test point, so easy inputs end up far below the target risk $\alpha$ and hard inputs far above it. ReCIRC instead learns an estimate of the conditional risk $R(x,\lambda)$, inverts it at a common *risk budget* $a$ to obtain an input-specific $\lambda_a(x)$, and then calibrates the single scalar $a$ with CRC. The result is a risk profile that is close to flat at $\alpha$ whenever the risk model is informative, and a valid marginal guarantee regardless of how good the risk model is.
 
 <p align="center">
-  <img src="results/crc_recirc_intuition/part_b_flattening_risk_curve.png" alt="False-negative risk by difficulty bin for global CRC and ReCIRC in the polyp-segmentation experiment" width="500">
+  <img src="results/crc_recirc_intuition/part_b_flattening_risk_curve.png" alt="False-negative risk by difficulty bin for global CRC and ReCIRC in the polyp-segmentation experiment" width="650">
 </p>
 <p align="center"><sub>Polyp segmentation (Experiment 3), target α = 0.10. Global CRC meets α on average by over-protecting easy images and under-protecting hard ones; ReCIRC holds every difficulty bin near α.</sub></p>
 
