@@ -544,7 +544,7 @@ MIN_LEAF_QRF = 40
 SLICE_NMIN = 50
 
 # Number of quantile bins per slicing feature (slices are the 4x4 interactions).
-N_SLICE_BINS = 4
+N_SLICE_BINS = 2
 
 # Risk regressor backbone for R(x, lambda).
 RISK_BACKEND = "tabicl"  # "tabicl" (foundation model) or "histgb"
