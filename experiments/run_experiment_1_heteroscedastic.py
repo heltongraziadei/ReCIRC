@@ -68,6 +68,11 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from tabicl import TabICLRegressor
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 AACRC_CANDIDATES = [
@@ -480,7 +485,7 @@ def evaluate(loss, width, lam, sigma, alpha, method, lambda_grid, n_bins=5):
     return row, bin_risk
 
 
-def run_trial(args, seed, device):
+def run_trial(args, seed, device, diagnostic=None):
     rng = np.random.default_rng(seed)
     lambda_grid = np.linspace(0.0, args.lambda_max, args.lambda_points)
     a_grid = np.linspace(0.0, 1.0, args.a_points)
@@ -547,6 +552,25 @@ def run_trial(args, seed, device):
     lambdas["recirc"] = lambda_recirc
     lambdas["oracle"] = lambda_oracle
     diagnostics.update({"a_recirc": a_recirc, "a_oracle": a_oracle})
+
+    if diagnostic is not None:
+        edges = np.quantile(test["sigma"], np.linspace(0.0, 1.0, 6))
+        edges[0] -= 1e-9
+        bins = np.searchsorted(edges[1:-1], test["sigma"], side="right")
+        losses_by_budget = np.column_stack([
+            bounded_excess_loss(
+                residual_test,
+                invert_risk_matrix(risk_recirc_test, lambda_grid, a),
+            )
+            for a in a_grid
+        ])
+        diagnostic.add_trial(
+            a_grid,
+            losses_by_budget,
+            bin_groups(bins, 5),
+            seed=seed,
+            a_hat=a_recirc,
+        )
 
     rows = []
     bin_rows = []
@@ -677,11 +701,14 @@ def main():
     all_metrics = []
     all_bins = []
     diagnostics = []
+    risk_diagnostic = RiskCalibration()
     start = time.time()
     for trial in range(args.trials):
         seed = args.seed + trial + 1
         trial_start = time.time()
-        metrics, bins, _, diag = run_trial(args, seed, device)
+        metrics, bins, _, diag = run_trial(
+            args, seed, device, diagnostic=risk_diagnostic
+        )
         metrics["trial"] = trial
         metrics["seed"] = seed
         bins["trial"] = trial
@@ -694,6 +721,7 @@ def main():
         print(f"\nTrial {trial + 1}/{args.trials} ({time.time() - trial_start:.1f}s)")
         print(compact.round(4).to_string(index=False))
 
+    risk_diagnostic.save(args.output_dir, make_plot=not args.no_plots)
     results = pd.concat(all_metrics, ignore_index=True)
     bin_results = pd.concat(all_bins, ignore_index=True)
     diagnostics_df = pd.DataFrame(diagnostics)
