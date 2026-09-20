@@ -138,7 +138,7 @@ N_BINS = 10
 DIFFICULTY_KIND = "entropy"
 
 LAMBDA_GRID = np.linspace(0.0, 1.0, 26)
-A_GRID = np.linspace(0.0, 0.5, 101)
+A_GRID = np.linspace(0.0, 1.0, 101)
 
 LAMBDA_GRID_CRC = np.unique(np.concatenate([
     np.linspace(0.0, 0.25, 251),
@@ -519,6 +519,12 @@ def invert_risk_curve(R, lambda_grid, a):
     return np.where(R[:, 0] > a, lambda_grid[0], lambdas)
 
 
+try:
+    from .risk_calibration import RiskCalibration, bin_groups
+except ImportError:
+    from risk_calibration import RiskCalibration, bin_groups
+
+
 def free_memory():
     import gc
     gc.collect()
@@ -532,7 +538,8 @@ def free_memory():
 
 def run_recirc(
     D_scores, D_labels, cal_scores, cal_labels, test_scores, lambda_grid, a_grid, alpha,
-    include_full_scores=True, n_d_tabicl=1000, device="cpu", seed=0
+    include_full_scores=True, n_d_tabicl=1000, device="cpu", seed=0,
+    return_risk=False,
 ):
     """Roda ReCIRC-TabICL."""
     rng = np.random.default_rng(seed)
@@ -572,16 +579,20 @@ def run_recirc(
     pred = prediction_sets(test_scores, lam_test)
     elapsed = time.time() - t0
 
-    del model, X_aug, Z, R_cal, R_test
-    free_memory()
-
-    return {
+    result = {
         "pred": pred,
         "lambdas": lam_test,
         "a_hat": a_hat,
         "risks_cal": risks_cal,
         "time": elapsed,
     }
+    if return_risk:
+        result["test_risk"] = R_test
+
+    del model, X_aug, Z, R_cal, R_test
+    free_memory()
+
+    return result
 
 
 # ============================================================================
@@ -703,7 +714,7 @@ def conditional_by_bin(pred, gt, bins, n_bins, name):
     )
 
 
-def run_one_split_trial(scores, gt, seed):
+def run_one_split_trial(scores, gt, seed, diagnostic=None):
     """Executa um trial do experimento de múltiplos splits."""
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(scores))
@@ -736,8 +747,25 @@ def run_one_split_trial(scores, gt, seed):
     rk = "ReCIRC-TabICL" if HAS_TABICL else "ReCIRC-HGB"
     o = run_recirc(
         Ds, Dl, cs, cl, ts, LAMBDA_GRID, A_GRID, ALPHA, INCLUDE_FULL_SCORES,
-        n_d_tabicl=N_D_TABICL, device=DEVICE, seed=seed
+        n_d_tabicl=N_D_TABICL, device=DEVICE, seed=seed,
+        return_risk=diagnostic is not None,
     )
+    if diagnostic is not None:
+        losses_by_budget = np.column_stack([
+            per_image_fnr(
+                prediction_sets(ts, invert_risk_curve(o["test_risk"], LAMBDA_GRID, a)),
+                tl,
+            )
+            for a in A_GRID
+        ])
+        diagnostic.add_trial(
+            A_GRID,
+            losses_by_budget,
+            bin_groups(tb, N_BINS),
+            seed=seed,
+            a_hat=o["a_hat"],
+        )
+        del o["test_risk"]
     preds[rk] = o["pred"]
     lam_img[rk] = o["lambdas"]
 
@@ -779,7 +807,7 @@ def run_one_split_trial(scores, gt, seed):
     return marg, cond, adapt
 
 
-def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=None):
+def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=None, diagnostic=None):
     """Executa múltiplos trials; cada trial é salvo em disco e pulado se já existir."""
     marg_list, cond_list, adapt_list = [], [], []
     if checkpoint_dir is not None:
@@ -790,7 +818,7 @@ def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=None):
         paths = None
         if checkpoint_dir is not None:
             paths = {k: checkpoint_dir / f"trial_{t:03d}_{k}.csv" for k in ("marg", "cond", "adapt")}
-            if paths["marg"].exists() and paths["cond"].exists():
+            if diagnostic is None and paths["marg"].exists() and paths["cond"].exists():
                 m = pd.read_csv(paths["marg"])
                 c = pd.read_csv(paths["cond"])
                 a = pd.read_csv(paths["adapt"]) if paths["adapt"].exists() and paths["adapt"].stat().st_size > 1 else pd.DataFrame()
@@ -798,7 +826,9 @@ def run_multiple_trials(sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=None):
                 marg_list.append(m); cond_list.append(c); adapt_list.append(a)
                 continue
 
-        m, c, a = run_one_split_trial(sgmd, labels, BASE_SEED + t)
+        m, c, a = run_one_split_trial(
+            sgmd, labels, BASE_SEED + t, diagnostic=diagnostic
+        )
         for d in (m, c, a):
             if len(d) > 0:
                 d["trial"] = t
@@ -864,6 +894,7 @@ def plot_results(df_marginal, per_trial, test_labels):
         if m in df_marginal["method"].unique()
     ]
     palette = {"CRC marginal": "#1f77b4", "AA-CRC": "#ff7f0e", "ReCIRC-TabICL": "#d62728", "ReCIRC-HGB": "#d62728"}
+    display_labels = {"CRC marginal": "Marginal CRC"}
 
     final = df_marginal.merge(per_trial, on=["trial", "method"], how="left")
 
@@ -871,10 +902,10 @@ def plot_results(df_marginal, per_trial, test_labels):
     axes = axes.ravel()
 
     panels = [
-        ("test_fnr", r"$\widehat R_{test}$", "(a) Risco marginal", True),
-        ("worst_bin_risk", r"$\max_b \widehat R_b$", "(b) Pior bin", True),
-        ("mean_excess_by_bin", "Excesso médio", "(c) Excesso por bin", False),
-        ("avg_size", "Tamanho do conjunto", "(d) Tamanho médio", False),
+        ("test_fnr", r"$\widehat R_{test}$", "(a) Marginal risk", True),
+        ("worst_bin_risk", r"$\max_b \widehat R_b$", "(b) Worst bin", True),
+        ("mean_excess_by_bin", "Mean excess", "(c) Excess by bin", False),
+        ("avg_size", "Set size", "(d) Mean set size", False),
     ]
 
     jit = np.random.default_rng(0)
@@ -889,13 +920,17 @@ def plot_results(df_marginal, per_trial, test_labels):
             ax.axhline(ALPHA, ls="--", color="gray", lw=1.5)
 
         ax.set_xticks(range(len(methods_order)))
-        ax.set_xticklabels(methods_order, fontsize=9, rotation=15)
+        ax.set_xticklabels(
+            [display_labels.get(method, method) for method in methods_order],
+            fontsize=9,
+            rotation=15,
+        )
         ax.set_ylabel(ylab)
         ax.set_title(title)
         ax.grid(axis="y", alpha=0.35)
 
     fig.suptitle(
-        f"RCV1 texto multilabel | alpha={ALPHA} | {final['trial'].nunique()} splits",
+        f"RCV1 multilabel text | alpha={ALPHA} | {final['trial'].nunique()} splits",
         fontsize=13,
         fontweight="bold",
         y=1.02,
@@ -911,6 +946,7 @@ def plot_conditional_coverage(df_conditional):
         if m in df_conditional["method"].unique()
     ]
     palette = {"CRC marginal": "#1f77b4", "AA-CRC": "#ff7f0e", "ReCIRC-TabICL": "#d62728", "ReCIRC-HGB": "#d62728"}
+    display_labels = {"CRC marginal": "Marginal CRC"}
 
     agg = df_conditional.groupby(["method", "bin"], as_index=False).agg(
         mean_cond_risk=("conditional_risk", "mean"),
@@ -928,21 +964,27 @@ def plot_conditional_coverage(df_conditional):
             yerr=tmp["sd_cond_risk"],
             marker="o",
             capsize=3,
-            label=m,
+            label=display_labels.get(m, m),
             color=palette.get(m, "gray"),
         )
-        axes[1].plot(tmp["bin"], tmp["mean_size"], marker="o", label=m, color=palette.get(m, "gray"))
+        axes[1].plot(
+            tmp["bin"],
+            tmp["mean_size"],
+            marker="o",
+            label=display_labels.get(m, m),
+            color=palette.get(m, "gray"),
+        )
 
     axes[0].axhline(ALPHA, ls="--", color="gray", label=fr"$\alpha={ALPHA}$")
-    axes[0].set_xlabel("Bin de dificuldade (entropia)")
-    axes[0].set_ylabel("FNR condicional")
-    axes[0].set_title("Cobertura condicional")
+    axes[0].set_xlabel("Difficulty bin (entropy)")
+    axes[0].set_ylabel("Conditional FNR")
+    axes[0].set_title("Conditional coverage")
     axes[0].legend(fontsize=9)
     axes[0].grid(alpha=0.3)
 
-    axes[1].set_xlabel("Bin de dificuldade")
-    axes[1].set_ylabel("Tamanho médio")
-    axes[1].set_title("Tamanho por bin")
+    axes[1].set_xlabel("Difficulty bin")
+    axes[1].set_ylabel("Mean set size")
+    axes[1].set_title("Set size by bin")
     axes[1].legend(fontsize=9)
     axes[1].grid(alpha=0.3)
 
@@ -1026,8 +1068,13 @@ def main(args=None):
 
     # Múltiplos trials
     print("Executando múltiplos trials...")
+    risk_diagnostic = RiskCalibration()
     df_marginal, df_conditional, df_adapt = run_multiple_trials(
-        sgmd, labels, n_trials=N_TRIALS, checkpoint_dir=checkpoint_dir
+        sgmd,
+        labels,
+        n_trials=N_TRIALS,
+        checkpoint_dir=checkpoint_dir,
+        diagnostic=risk_diagnostic,
     )
     print()
 
@@ -1045,6 +1092,7 @@ def main(args=None):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         results_dir = os.path.join(base_dir, "results", f"experiment_4_rcv1_text_{timestamp}")
     Path(results_dir).mkdir(parents=True, exist_ok=True)
+    risk_diagnostic.save(results_dir)
     print(f"\nSalvando resultados em: {results_dir}")
 
     # Salvar DataFrames
