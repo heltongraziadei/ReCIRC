@@ -24,27 +24,27 @@ Let $\lbrace C_\lambda(x)\rbrace_{\lambda\in\Lambda}$ be a nested family of pred
 
 2. **Inversion at a budget.** For a budget $a$, set
 
-   $$
-   \lambda_a(x)=\min\lbrace\lambda\in\Lambda:\ \hat R(x,\lambda)\le a\rbrace,
-   $$
+   ```math
+   \lambda_a(x)=\min\{\lambda\in\Lambda:\ \hat R(x,\lambda)\le a\},
+   ```
 
    falling back to the largest $\lambda$ when no grid point qualifies.
 
 3. **Rectification (on $\mathcal C$).** Choose the largest budget whose CRC bound stays below the target,
 
-   $$
-   \hat a=\max\Bigl\lbrace a:\ \tfrac{n}{n+1}\,\hat L_{\mathcal C}(a)+\tfrac{B}{n+1}\le\alpha\Bigr\rbrace,
+   ```math
+   \hat a=\max\left\{a:\ \frac{n}{n+1}\hat L_{\mathcal C}(a)+\frac{B}{n+1}\le\alpha\right\},
    \qquad
-   \hat L_{\mathcal C}(a)=\tfrac1n\textstyle\sum_{i\in\mathcal C}\ell\big(\lambda_a(X_i);X_i,Y_i\big).
-   $$
+   \hat L_{\mathcal C}(a)=\frac{1}{n}\sum_{i\in\mathcal C}\ell\bigl(\lambda_a(X_i);X_i,Y_i\bigr).
+   ```
 
 4. **Deployment.** Return $C_{\lambda_{\hat a}(x)}(x)$ for each test input.
 
 Because $\hat R$ is fitted on $\mathcal D$ only, the map $a\mapsto\ell(\lambda_a(x);x,y)$ is non-decreasing for every $(x,y)$, so step 3 is ordinary CRC over a one-dimensional family and inherits its marginal guarantee
 
-$$
-\mathbb E\big[\ell(\lambda_{\hat a}(X);X,Y)\big]\le\alpha.
-$$
+```math
+\mathbb E\bigl[\ell(\lambda_{\hat a}(X);X,Y)\bigr]\le\alpha.
+```
 
 Under the stated sample-splitting construction, the quality of $\hat R$ affects how evenly risk is distributed across inputs, but not the marginal CRC guarantee.
 
