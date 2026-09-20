@@ -9,7 +9,7 @@
 <p align="center">
   <img src="results/crc_recirc_intuition/part_b_flattening_risk_curve.png"
        alt="False-negative risk by difficulty bin for global CRC and ReCIRC in the polyp-segmentation experiment"
-       style="max-height: 220px; width: auto;">
+       width="600">
 </p>
 <p align="center"><sub>Polyp segmentation (Experiment 3), target α = 0.10. Global CRC meets α on average by over-protecting easy images and under-protecting hard ones; ReCIRC holds every difficulty bin near α.</sub></p>
 
