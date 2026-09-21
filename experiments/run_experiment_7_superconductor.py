@@ -585,7 +585,7 @@ PALETTE = {
 AACRC_BASIS = "both"
 AACRC_FEATURES = "x"
 AACRC_RIDGE_INTERCEPT = False
-RECIRC_OOB_CONTEXT = False
+RECIRC_OOB_CONTEXT = True
 
 
 # -----------------------------------------------------------------------------
