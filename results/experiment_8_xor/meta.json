@@ -3,7 +3,7 @@
   "aacrc": {
     "source_commit": "64504c011ac2db910e258037e48170a63381b5e6",
     "source_sha256": "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315",
-    "source_path": "/tmp/recirc-aacrc-validation/multiaccurate_cp/utils/multiaccurate.py",
+    "source_path": "/content/drive/MyDrive/PythonReCIRC/AA-CRC/multiaccurate_cp/utils/multiaccurate.py",
     "integration": "serial",
     "ridge": 0.01,
     "maxiter": 200,
@@ -46,7 +46,7 @@
   "n_features": 8,
   "risk_backend": "tabicl",
   "recirc_enabled": true,
-  "recirc_oob_context": false,
+  "recirc_oob_context": true,
   "tabicl_device": "cuda",
   "tabicl_context_size": 4000,
   "frac_D": 0.4,
@@ -281,5 +281,5 @@
   },
   "slice_nmin": 50,
   "save_predictions": false,
-  "elapsed_seconds": 400.98513674736023
+  "elapsed_seconds": 779.36971616745
 }

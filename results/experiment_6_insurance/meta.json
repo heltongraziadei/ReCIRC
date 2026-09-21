@@ -3,7 +3,7 @@
   "aacrc": {
     "source_commit": "64504c011ac2db910e258037e48170a63381b5e6",
     "source_sha256": "9b3cffcb45f2e9a74f467ec94a00be7fcf2a24ec85f2dfe56f01d7fbd4a51315",
-    "repository": "/tmp/recirc-aacrc-validation",
+    "repository": "/content/drive/MyDrive/PythonReCIRC/AA-CRC",
     "objective": "authors J/J_prime",
     "integration": "serial",
     "quadrature_nodes": 100,
@@ -41,13 +41,13 @@
     "theory_note": "task adaptation of the authors' objective; truncation (linear arm) can increase risk; no additional validity claim",
     "lambda_grid_applies": false
   },
-  "data_file": "/home/bresende/projects/pesquisa/CRC_rectification/experiments/data_insurance/insurance.csv",
+  "data_file": "/content/drive/MyDrive/PythonReCIRC/data_insurance/insurance.csv",
   "alpha": 0.1,
   "n_trials": 20,
   "seed": 42,
   "risk_model": "tabicl",
   "recirc_enabled": true,
-  "recirc_oob_context": false,
+  "recirc_oob_context": true,
   "tabicl_device": "cuda",
   "n_obs": 1338,
   "n_features": 11,
@@ -288,5 +288,5 @@
   "slice_nmin": 30,
   "n_bins": 5,
   "mean_crc_train_test_gap": -0.0013550959527492523,
-  "elapsed_seconds": 158.686372756958
+  "elapsed_seconds": 280.78001070022583
 }
