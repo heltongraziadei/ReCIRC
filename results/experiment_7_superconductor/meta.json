@@ -46,7 +46,7 @@
     "range_ThermalConductivity",
     "wtd_std_ThermalConductivity"
   ],
-  "slice_bins": 4,
+  "slice_bins": 2,
   "save_predictions": false,
   "risk_backend": "tabicl",
   "tabicl_device": "cuda",
@@ -291,5 +291,5 @@
     "min_samples_leaf": 40
   },
   "slice_nmin": 50,
-  "elapsed_seconds": 1657.6284809112549
+  "elapsed_seconds": 1638.8406352996826
 }
