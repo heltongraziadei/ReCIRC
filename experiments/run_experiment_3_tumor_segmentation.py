@@ -530,7 +530,7 @@ def run_trial(probabilities, masks, features, config, seed, device):
     context_y, calibration_y, test_y = masks[context_index], masks[calibration_index], masks[test_index]
     context_x, calibration_x, test_x = (features.iloc[index].reset_index(drop=True)
                                         for index in (context_index, calibration_index, test_index))
-    lambda_grid = np.linspace(0, 1, 51)
+    lambda_grid = np.linspace(0.0, 1.0, 101)
     a_grid = np.r_[0.0, np.linspace(0.001, 1.0, 100)]
     test_bins = apply_uncertainty_bins(test_p, fit_uncertainty_edges(context_p, config.n_bins))
     predictions, lambdas = {}, {}
@@ -804,7 +804,7 @@ def main():
             seed = config.base_seed + trial
             d, c, t = make_three_way_split(len(probabilities), config.n_context,
                                           config.n_calibration, seed)
-            lambda_grid = np.linspace(0, 1, 51)
+            lambda_grid = np.linspace(0.0, 1.0, 101)
             a_grid = np.r_[0.0, np.linspace(0.001, 1.0, 100)]
             edges = fit_uncertainty_edges(probabilities[d], config.n_bins)
             bins = apply_uncertainty_bins(probabilities[t], edges)
