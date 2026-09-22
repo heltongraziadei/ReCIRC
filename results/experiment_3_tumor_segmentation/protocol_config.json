@@ -22,7 +22,7 @@
     "device": "cuda",
     "data_dir": "/home/bresende/.cache/recirc/experiment_3_tumor_segmentation",
     "data_file": "data/polyps/polyps-pranet.npz",
-    "output_dir": "/home/bresende/projects/pesquisa/CRC_rectification/results/experiment_3_tumor_segmentation/rerun_20_trials_a_grid_0_plus_original",
+    "output_dir": "/home/bresende/projects/pesquisa/CRC_rectification/results/experiment_3_tumor_segmentation/rerun_20_trials_lambda_grid_101",
     "keep_download": false,
     "no_plots": false,
     "diagnostic_only": false,
@@ -39,5 +39,5 @@
     "tabicl": "2.1.1",
     "torch": "2.12.0"
   },
-  "elapsed_seconds": 725.6293120384216
+  "elapsed_seconds": 1048.9297749996185
 }
