@@ -120,32 +120,20 @@ def save_risk_calibration(curves, output_dir, make_plot=True, ylabel="Average lo
                              squeeze=False, sharex=True, sharey=True)
     for ax, group in zip(axes.flat, groups):
         sub = curves[curves["group"] == group]
-        ax.axvspan(lower, upper, color="#F2C94C", alpha=0.25,
+        ax.axvspan(lower, upper, color="#F2C94C", alpha=0.10, linewidth=0,
                    label=f"Operating range [{lower:.2f}, {upper:.2f}]")
         for _, trial in sub.groupby("trial"):
-            ax.plot(trial["a"], trial["risk"] - trial["a"], color="#002F6C", alpha=0.18, lw=1)
+            ax.plot(trial["a"], trial["risk"], color="#002F6C", alpha=0.18, lw=1)
         mean = summary[summary["group"] == group]
-        ax.plot(mean["a"], mean["risk"] - mean["a"], color="#002F6C", lw=2, label="Mean loss − a")
-        ax.axhline(0, color="black", linestyle="--", lw=1, label="Loss = budget")
+        ax.plot(mean["a"], mean["risk"], color="#002F6C", lw=2, label="Mean loss")
+        ax.plot([0, 1], [0, 1], color="black", linestyle="--", lw=1, label="Loss = budget")
         if target is not None:
             ax.axvline(target, color="#C0392B", linestyle="-.", lw=1.2,
                        label=fr"Target $\alpha={target:.2f}$")
-        operating_row = operating.loc[operating["group"] == group].iloc[0]
-        if np.isfinite(operating_row["max_signed_deviation"]):
-            budget = operating_row["a_at_max_signed_deviation"]
-            maximum = operating_row["max_signed_deviation"]
-            ax.scatter([budget], [maximum], color="#8A6D00", s=22, zorder=5)
-            ax.annotate(
-                f"Max signed gap: {maximum:+.3f}\nat $a={budget:.3f}$",
-                xy=(budget, maximum), xytext=(0.04, 0.94), textcoords="axes fraction",
-                ha="left", va="top", fontsize=7.5, color="#6F5700",
-                arrowprops={"arrowstyle": "-", "color": "#8A6D00", "lw": 0.8},
-                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.65, "pad": 1.5},
-            )
         n_min, n_max = int(sub["n"].min()), int(sub["n"].max())
         count_label = str(n_min) if n_min == n_max else f"{n_min}–{n_max}"
         ax.set(title=f"{group} (n={count_label})",
-               xlabel="Risk budget a", ylabel=f"{ylabel} − a", xlim=(0, 1))
+               xlabel="Risk budget a", ylabel=ylabel, xlim=(0, 1))
         ax.grid(alpha=0.2)
     for ax in axes.flat[len(groups):]:
         ax.set_visible(False)
@@ -158,3 +146,21 @@ def save_risk_calibration(curves, output_dir, make_plot=True, ylabel="Average lo
     fig.savefig(output_dir / "risk_calibration.png", dpi=200)
     fig.savefig(output_dir / "risk_calibration.pdf")
     plt.close(fig)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Replot held-out risk calibration from a saved per-trial CSV; no model fitting."
+    )
+    parser.add_argument("--input-csv", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    args = parser.parse_args()
+    curves = pd.read_csv(args.input_csv)
+    required = {"group", "a", "n", "risk", "trial"}
+    missing = required - set(curves.columns)
+    if missing:
+        parser.error(f"Missing CSV columns: {sorted(missing)}")
+    save_risk_calibration(curves, args.output_dir)
+    print(f"Saved calibration plots and tables to {args.output_dir.resolve()}")
